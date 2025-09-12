@@ -29,4 +29,4 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MOVIE_CODE: ${{ secrets.MOVIE_CODE }}
           CITY_CODE: ${{ secrets.CITY_CODE }}
-        run: python demon_slayer_bot.py
+        run: python demon_slayer_ticket_notification.py
