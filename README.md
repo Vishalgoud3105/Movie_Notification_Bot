@@ -64,3 +64,25 @@ Once the setup is complete, the bot will automatically run every 5 minutes. You 
 - This script is intended for personal, non-commercial use only.
 - Web scraping can be sensitive to website changes. If the BookMyShow website's structure changes, the script may need to be updated.
 - Use at your own risk. This project is not affiliated with or endorsed by BookMyShow.
+
+---
+
+<div align="center">
+
+**Built with 💻 and ☕ by Vishal Goud**
+
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-blue?style=flat&logo=linkedin)](http://www.linkedin.com/in/vishalgoud3105)
+[![GitHub](https://img.shields.io/badge/GitHub-black?style=flat&logo=github)](https://github.com/Vishalgoud3105)
+[![Portfolio](https://img.shields.io/badge/Portfolio-orange?style=flat)](https://vishalgoud3105.github.io/Portfolio/)
+
+---
+
+### 📬 Contact
+
+This repository is **private**. For collaboration inquiries, demo requests, or questions:
+
+📧 **Email**: [vishalgoud3105@gmail.com](mailto:vishalgoud3105@gmail.com)  
+💼 **LinkedIn**: [vishalgoud](http://www.linkedin.com/in/vishalgoud3105)  
+🌐 **Portfolio**: [vishalgoud3105.github.io](https://vishalgoud3105.github.io/Portfolio/)
+
+⭐ **Interested in this project? Reach out!** ⭐
