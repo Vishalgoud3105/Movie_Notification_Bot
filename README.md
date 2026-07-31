@@ -65,6 +65,27 @@ For GitHub Actions, add `TELEGRAM_API_TOKEN` and `TELEGRAM_CHAT_ID` under
 Notification state (`seen.json`) rides in the Actions cache, so you get told
 once, not every 10 minutes.
 
+## Shift reports
+
+So you always know it's alive, the bot files a report at the end of each shift
+(IST — Actions runs in UTC, so the offset is applied explicitly):
+
+| Shift | Window |
+|---|---|
+| Morning | 07:00–12:00 |
+| Afternoon | 12:00–18:00 |
+| Evening | 18:00–21:00 |
+| Night | 21:00–24:00 |
+
+Each report gives the number of checks run, first and last check time, whether
+BMS was reachable, how far ahead BMS is currently selling, and per-date status
+for 8 and 9 Aug. The report for a shift is sent by the first run of the *next*
+shift, so a missing report means the workflow itself stopped — that absence is
+a signal worth acting on.
+
+Between 00:00 and 07:00 no shift is defined, so no report is filed. The watcher
+still runs and would still alert on an opening during those hours.
+
 ## Config
 
 | Var | Default | Meaning |

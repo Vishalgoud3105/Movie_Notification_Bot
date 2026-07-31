@@ -302,6 +302,56 @@ def alert_text(by_date):
     ] + format_days(by_date) + ["", "❌ = already sold out"])
 
 
+# India has no DST, so a fixed offset is exactly right and needs no tzdata.
+# GitHub Actions runs in UTC; every shift boundary below is your local time.
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+SHIFTS = [("Morning", 7, 12), ("Afternoon", 12, 18), ("Evening", 18, 21), ("Night", 21, 24)]
+
+
+def shift_at(now):
+    """('Morning', 7, 12) for an IST datetime, or None between midnight and 7am."""
+    return next((s for s in SHIFTS if s[1] <= now.hour < s[2]), None)
+
+
+def load_state():
+    """{'seen': [...], 'shift': {...}}, tolerating the old plain-list format."""
+    if not os.path.exists(STATE_FILE):
+        return {"seen": [], "shift": None}
+    with open(STATE_FILE) as f:
+        raw = json.load(f)
+    if isinstance(raw, list):
+        return {"seen": raw, "shift": None}
+    return {"seen": raw.get("seen", []), "shift": raw.get("shift")}
+
+
+def shift_report(t):
+    """End-of-shift summary: proof the bot is alive and what it saw."""
+    name = t["name"]
+    lo, hi = next(((a, b) for n, a, b in SHIFTS if n == name), (0, 0))
+    nxt = SHIFTS[(([s[0] for s in SHIFTS].index(name)) + 1) % len(SHIFTS)]
+
+    lines = ["📋 %s SHIFT REPORT" % name.upper(),
+             "🕒 %02d:00-%02d:00 IST · %s" % (lo, hi, pretty_date(t["date"])),
+             "",
+             "🔁 Checks run: %d%s" % (t["checks"],
+                                      " (%s → %s)" % (t["first"], t["last"]) if t["checks"] else ""),
+             "📡 BookMyShow reachable: %s" % ("yes ✅" if not t["errors"]
+                                              else "%d failed check(s) ⚠️" % t["errors"])]
+    if t.get("bookable"):
+        lines.append("📆 BMS is selling up to: %s" % pretty_date(t["bookable"]))
+    lines += ["", "🎯 Watching %s %s, %s-%s:" % (LANGUAGE, FORMAT, TIME_FROM, TIME_TO)]
+    for date_code in DATES:
+        n = (t.get("found") or {}).get(date_code, 0)
+        lines.append("  %s %s - %s" % ("✅" if n else "🔒", pretty_date(date_code),
+                                       "%d shows FOUND, alert sent!" % n if n else "not open yet"))
+    if all((t.get("found") or {}).get(d) for d in DATES):
+        lines += ["", "🎉 Both dates are open. My job here is done!"]
+    else:
+        lines += ["", "⏭️ Next up: %s shift (%02d:00-%02d:00). Still watching. 👀"
+                  % (nxt[0], nxt[1], nxt[2])]
+    return "\n".join(lines)
+
+
 def send_telegram(text):
     token = os.environ.get("TELEGRAM_API_TOKEN")
     chat = os.environ.get("TELEGRAM_CHAT_ID")
@@ -317,10 +367,23 @@ def send_telegram(text):
 
 
 def main():
-    seen = set()
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            seen = set(json.load(f))
+    state = load_state()
+    seen = set(state["seen"])
+    now = dt.datetime.now(IST)
+    shift = shift_at(now)
+
+    # A shift ended if the tally we carry belongs to a different shift or day.
+    # Report it before starting a new one, so you get one summary per shift.
+    tally = state["shift"]
+    if tally and (tally["name"] != (shift[0] if shift else None)
+                  or tally["date"] != now.strftime("%Y%m%d")):
+        send_telegram(shift_report(tally))
+        print("sent %s shift report" % tally["name"])
+        tally = None
+    if shift and not tally:
+        tally = {"name": shift[0], "date": now.strftime("%Y%m%d"), "checks": 0,
+                 "first": None, "last": None, "errors": 0, "found": {}, "bookable": None}
+
     # Cron fires on the exact tick for everyone; a random offset keeps this
     # request out of the top-of-the-minute crowd.
     time.sleep(random.uniform(0, 45))
@@ -339,10 +402,21 @@ def main():
         print("%s: bookable dates on BMS right now -> %s" % (date_code, offered[-3:] or "none"))
         found = shows_for(data, date_code)
         print("%s: %d shows in window" % (date_code, len(found)))
-        for key, text in sorted(found):
+        if tally:
+            if offered:
+                tally["bookable"] = max(offered)
+            tally["found"][date_code] = max(len(found), tally["found"].get(date_code, 0))
+        for key, show in sorted(found):
             all_keys.add(key)
             if key not in seen:
-                fresh.append((date_code, text))
+                fresh.append((date_code, show))
+
+    if tally:
+        tally["checks"] += 1
+        tally["errors"] += len(broken)
+        stamp = now.strftime("%I:%M %p").lstrip("0")
+        tally["first"] = tally["first"] or stamp
+        tally["last"] = stamp
 
     if fresh:
         by_date = {}
@@ -353,7 +427,7 @@ def main():
         print("nothing new")
 
     with open(STATE_FILE, "w") as f:
-        json.dump(sorted(all_keys | seen), f)
+        json.dump({"seen": sorted(all_keys | seen), "shift": tally}, f)
 
     if broken:
         # Loud on purpose. "Couldn't reach BMS" looks exactly like "not open yet"
@@ -488,6 +562,26 @@ def demo():
         {"ShowTime": "10:00 AM", "EventCode": "E4DX"}]}],
         "events": [{"EventCode": "E4DX", "EventLang": "English",
                     "EventDimension": "4DX 3D"}]}, "20260808") == []
+
+    # shift boundaries: every hour lands in exactly one shift, 00:00-07:00 in none
+    at = lambda h: shift_at(dt.datetime(2026, 8, 1, h, 0, tzinfo=IST))
+    assert [at(h) and at(h)[0] for h in (0, 6, 7, 11, 12, 17, 18, 20, 21, 23)] == [
+        None, None, "Morning", "Morning", "Afternoon", "Afternoon",
+        "Evening", "Evening", "Night", "Night"]
+    assert len({at(h)[0] for h in range(7, 24)}) == 4      # all four reachable
+    assert shift_report({"name": "Night", "date": "20260801", "checks": 18,
+                         "first": "9:02 PM", "last": "11:54 PM", "errors": 0,
+                         "found": {}, "bookable": "20260805"}).startswith("📋 NIGHT SHIFT")
+
+    # legacy plain-list state must still load
+    import tempfile
+    global STATE_FILE
+    keep, STATE_FILE = STATE_FILE, os.path.join(tempfile.gettempdir(), "_bms_legacy.json")
+    with open(STATE_FILE, "w") as f:
+        json.dump(["a|b"], f)
+    assert load_state() == {"seen": ["a|b"], "shift": None}
+    os.remove(STATE_FILE)
+    STATE_FILE = keep
 
     FORMAT, LANGUAGE = "", ""       # blank filters = report everything
     assert len(shows_for(payload, "20260808")) == 5
