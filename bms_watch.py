@@ -448,8 +448,18 @@ def poll_commands(state):
             continue                                  # not you - ignore
         text = (msg.get("text") or "").strip().lower().lstrip("/")
         if text:
-            commands.append(text.split("@")[0].split()[0])
+            commands.append(text.replace("@", " "))
     return commands
+
+
+# No LLM here, just keyword matching - so accept the words a person would
+# actually type rather than demanding an exact command.
+ASK_WORDS = ("report", "status", "check", "update", "news", "any luck", "open yet")
+
+
+def wants_report(text):
+    """True if this message is asking how things are going."""
+    return any(w in text for w in ASK_WORDS)
 
 
 def main():
@@ -503,14 +513,17 @@ def main():
     # so asking for a report costs BookMyShow no extra requests.
     for cmd in poll_commands(state):
         print("command from you: /%s" % cmd)
-        if cmd in ("report", "status", "check"):
+        if wants_report(cmd):
             send_telegram(live_report(hits, broken, bookable,
                                       checks=(tally or {}).get("checks", 1)))
         else:
             send_telegram("\n".join([
                 "🤖 I'm watching BookMyShow for you.",
                 "",
-                "/report - status right now",
+                "I'm not an AI - I just look for a keyword. Say any of:",
+                "  report · status · check · update · news",
+                "with or without a /, in any sentence.",
+                "  e.g. \"report\", \"/status\", \"any update?\"",
                 "",
                 "You'll also get a report at the end of each shift,",
                 "and one 🚨 alert the moment %s opens for %s."
@@ -679,6 +692,12 @@ def demo():
     os.environ["TELEGRAM_CHAT_ID"] = "999"
     st = {"tg_offset": 0}
     assert poll_commands(st) == ["report", "hello"], "must ignore other chats"
+    # keyword matching: anywhere in the sentence, slash or not, any case
+    for asked in ("report", "/report", "Status", "any update?", "hey whats the status",
+                  "is it open yet", "check pls", "any news"):
+        assert wants_report(asked.lower().lstrip("/")), asked
+    for chat in ("hello", "hi", "thanks", "good morning"):
+        assert not wants_report(chat), chat
     assert st["tg_offset"] == 10, st                 # acked past the last update
     requests.post = real_post
     if keep_chat is not None:
