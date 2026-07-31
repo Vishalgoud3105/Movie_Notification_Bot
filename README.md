@@ -69,16 +69,47 @@ endpoint change avoids it.
 The workflow file is kept with its cron commented out and `workflow_dispatch`
 still enabled, purely so the block can be re-probed later.
 
+## Layout
+
+```
+bms_watch.py            CLI entry only
+watcher/
+  config.py             settings, headers, shift windows, keywords
+  bms.py                fetch, parse, filter, scan
+  messages.py           alerts, shift reports, formatting
+  shifts.py             shift boundary handling
+  state.py              seen.json
+  telegram.py           send, poll, reply
+  runner.py             the run modes
+tests/test_watcher.py   offline self-checks, no framework
+```
+
+Only dependency is `requests`. There is no web server and no framework — long
+polling means the bot makes outbound calls only, so there is nothing to host and
+no inbound surface. A webhook would be the alternative, and would need a public
+HTTPS host.
+
 ## Setup
 
 ```bash
 pip install -r requirements.txt
 cp .env.example .env          # then fill in your own values
+
 python bms_watch.py --selftest   # offline logic check, no network
-python bms_watch.py --test       # sends a test message + a preview of the real alert
-python bms_watch.py              # one real check
+python bms_watch.py --test       # test message + a preview of the real alert
 python bms_watch.py --report     # status report right now
+python bms_watch.py              # one check, for cron / Task Scheduler
+python -u bms_watch.py --serve   # stay running: instant chat replies
 ```
+
+**`--serve` runs two clocks on purpose.** Telegram is long-polled, so a message
+you type is answered in about a second. BookMyShow is still only scanned every
+`SCAN_EVERY` seconds (600 by default) — replying fast must not mean hammering
+them — and a reply between scans reports the last scan's data. Shift boundaries
+are checked every loop, so a shift report lands on the boundary itself.
+
+Use `-u` when redirecting its output: Python buffers stdout, so a long-running
+process otherwise writes nothing to its log until it exits.
 
 Scheduled run every 10 minutes (Windows):
 
@@ -132,8 +163,8 @@ this is exact and needs no tzdata on a UTC host.
 > report · status · check · update · news
 
 with or without a `/`, in any sentence (`any update?` works). There is no LLM
-here, just keyword matching. Replies arrive within one polling interval, since
-the bot reads messages when it wakes rather than running a server.
+here, just keyword matching. Under `--serve` the reply is effectively instant;
+under a one-shot schedule it arrives on the next run.
 
 ## Config
 
@@ -147,6 +178,8 @@ the bot reads messages when it wakes rather than running a server.
 | `LANGUAGE` | `English` | Blank = any |
 | `VENUES` | *(empty)* | Comma-separated substrings; empty = all |
 | `MOVIE_SLUG` / `MOVIE_NAME` | Spider-Man | Booking link and alert title only |
+| `SCAN_EVERY` | `600` | `--serve` only: seconds between BMS scans |
+| `LONG_POLL` | `25` | `--serve` only: seconds each Telegram poll is held open |
 
 Every setting has a default in code; `.env` and secrets only override.
 
