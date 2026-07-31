@@ -320,8 +320,9 @@ def load_state():
     with open(STATE_FILE) as f:
         raw = json.load(f)
     if isinstance(raw, list):
-        return {"seen": raw, "shift": None}
-    return {"seen": raw.get("seen", []), "shift": raw.get("shift")}
+        return {"seen": raw, "shift": None, "tg_offset": 0}
+    return {"seen": raw.get("seen", []), "shift": raw.get("shift"),
+            "tg_offset": raw.get("tg_offset", 0)}
 
 
 def shift_report(t):
@@ -366,6 +367,84 @@ def send_telegram(text):
             print("telegram error %s: %s" % (r.status_code, r.text[:200]))
 
 
+def scan(session):
+    """One pass over every watched date.
+
+    Returns ({date: [(key, show)]}, unreachable dates, furthest date BMS is selling).
+    """
+    hits, broken, bookable = {}, [], None
+    for i, date_code in enumerate(DATES):
+        if i:
+            time.sleep(random.uniform(4, 11))  # a person does not fetch 7 dates in 200ms
+        data = fetch(session, date_code)
+        if data is None:
+            broken.append(date_code)
+            continue
+        # BMS greys out dates it has not scheduled yet; isDisabled mirrors that.
+        offered = [d["DateCode"] for d in data.get("ShowDatesArray", []) if not d.get("isDisabled")]
+        print("%s: bookable dates on BMS right now -> %s" % (date_code, offered[-3:] or "none"))
+        if offered:
+            bookable = max(offered) if not bookable else max(bookable, max(offered))
+        found = sorted(shows_for(data, date_code))
+        print("%s: %d shows in window" % (date_code, len(found)))
+        hits[date_code] = found
+    return hits, broken, bookable
+
+
+def live_report(hits, broken, bookable, checks=1):
+    """A shift report describing this very moment, from an already-done scan."""
+    now = dt.datetime.now(IST)
+    shift = shift_at(now)
+    name = shift[0] if shift else SHIFTS[-1][0]   # 00:00-07:00: report the shift just ended
+    stamp = now.strftime("%I:%M %p").lstrip("0")
+    return shift_report({
+        "name": name, "date": now.strftime("%Y%m%d"), "checks": checks,
+        "first": stamp, "last": stamp, "errors": len(broken), "bookable": bookable,
+        "found": {d: len(hits.get(d, [])) for d in DATES},
+    })
+
+
+def report_now():
+    """Send a status report for right now, on demand. Does not touch seen.json."""
+    hits, broken, bookable = scan(requests.Session())
+    send_telegram(live_report(hits, broken, bookable))
+    print("report sent")
+
+
+def poll_commands(state):
+    """Read anything you typed to the bot since the last run.
+
+    Polled once per run rather than via a webhook, so a reply lands within one
+    cron interval. A webhook would be instant but needs a server to host.
+    Messages from any chat other than yours are ignored.
+    """
+    token = os.environ.get("TELEGRAM_API_TOKEN")
+    chat = str(os.environ.get("TELEGRAM_CHAT_ID", ""))
+    if not (token and chat):
+        return []
+    try:
+        # POST, not GET: a GET with these params gets connection-reset on some
+        # networks, while POST is accepted everywhere. Telegram allows both.
+        r = requests.post("https://api.telegram.org/bot%s/getUpdates" % token,
+                          json={"offset": state.get("tg_offset", 0), "timeout": 0},
+                          timeout=20)
+        updates = r.json().get("result", []) if r.status_code == 200 else []
+    except (requests.RequestException, ValueError) as e:
+        print("could not read telegram commands: %s" % e)
+        return []
+
+    commands = []
+    for u in updates:
+        state["tg_offset"] = u["update_id"] + 1      # ack, so it is not replayed
+        msg = u.get("message") or u.get("edited_message") or {}
+        if str((msg.get("chat") or {}).get("id")) != chat:
+            continue                                  # not you - ignore
+        text = (msg.get("text") or "").strip().lower().lstrip("/")
+        if text:
+            commands.append(text.split("@")[0].split()[0])
+    return commands
+
+
 def main():
     state = load_state()
     seen = set(state["seen"])
@@ -389,29 +468,16 @@ def main():
     time.sleep(random.uniform(0, 45))
 
     session = requests.Session()
-    fresh, all_keys, broken = [], set(), []
-    for i, date_code in enumerate(DATES):
-        if i:
-            time.sleep(random.uniform(4, 11))  # a person does not fetch 7 dates in 200ms
-        data = fetch(session, date_code)
-        if data is None:
-            broken.append(date_code)
-            continue
-        # BMS greys out dates it has not scheduled yet; isDisabled mirrors that.
-        offered = [d["DateCode"] for d in data.get("ShowDatesArray", []) if not d.get("isDisabled")]
-        print("%s: bookable dates on BMS right now -> %s" % (date_code, offered[-3:] or "none"))
-        found = shows_for(data, date_code)
-        print("%s: %d shows in window" % (date_code, len(found)))
-        if tally:
-            if offered:
-                tally["bookable"] = max(offered)
-            tally["found"][date_code] = max(len(found), tally["found"].get(date_code, 0))
-        for key, show in sorted(found):
-            all_keys.add(key)
-            if key not in seen:
-                fresh.append((date_code, show))
+    hits, broken, bookable = scan(session)
+    all_keys = {k for date_shows in hits.values() for k, _ in date_shows}
+    fresh = [(dc, s) for dc in DATES for k, s in hits.get(dc, []) if k not in seen]
 
     if tally:
+        if bookable:
+            tally["bookable"] = bookable
+        for date_code in DATES:
+            tally["found"][date_code] = max(len(hits.get(date_code, [])),
+                                            tally["found"].get(date_code, 0))
         tally["checks"] += 1
         tally["errors"] += len(broken)
         stamp = now.strftime("%I:%M %p").lstrip("0")
@@ -426,8 +492,26 @@ def main():
     else:
         print("nothing new")
 
+    # Anything you typed into the chat since the last run. Uses the scan above,
+    # so asking for a report costs BookMyShow no extra requests.
+    for cmd in poll_commands(state):
+        print("command from you: /%s" % cmd)
+        if cmd in ("report", "status", "check"):
+            send_telegram(live_report(hits, broken, bookable,
+                                      checks=(tally or {}).get("checks", 1)))
+        else:
+            send_telegram("\n".join([
+                "🤖 I'm watching BookMyShow for you.",
+                "",
+                "/report - status right now",
+                "",
+                "You'll also get a report at the end of each shift,",
+                "and one 🚨 alert the moment %s opens for %s."
+                % (FORMAT, " & ".join(pretty_date(d) for d in DATES))]))
+
     with open(STATE_FILE, "w") as f:
-        json.dump({"seen": sorted(all_keys | seen), "shift": tally}, f)
+        json.dump({"seen": sorted(all_keys | seen), "shift": tally,
+                   "tg_offset": state.get("tg_offset", 0)}, f)
 
     if broken:
         # Loud on purpose. "Couldn't reach BMS" looks exactly like "not open yet"
@@ -573,13 +657,31 @@ def demo():
                          "first": "9:02 PM", "last": "11:54 PM", "errors": 0,
                          "found": {}, "bookable": "20260805"}).startswith("📋 NIGHT SHIFT")
 
+    # telegram command parsing: only your chat, acked so it never replays
+    real_post = requests.post
+    requests.post = lambda *a, **k: type("R", (), {
+        "status_code": 200,
+        "json": staticmethod(lambda: {"result": [
+            {"update_id": 7, "message": {"chat": {"id": 999}, "text": "/report"}},
+            {"update_id": 8, "message": {"chat": {"id": 111}, "text": "/report@mybot"}},
+            {"update_id": 9, "message": {"chat": {"id": 999}, "text": "hello"}}]})})()
+    os.environ["TELEGRAM_API_TOKEN"] = os.environ.get("TELEGRAM_API_TOKEN") or "x"
+    keep_chat = os.environ.get("TELEGRAM_CHAT_ID")
+    os.environ["TELEGRAM_CHAT_ID"] = "999"
+    st = {"tg_offset": 0}
+    assert poll_commands(st) == ["report", "hello"], "must ignore other chats"
+    assert st["tg_offset"] == 10, st                 # acked past the last update
+    requests.post = real_post
+    if keep_chat is not None:
+        os.environ["TELEGRAM_CHAT_ID"] = keep_chat
+
     # legacy plain-list state must still load
     import tempfile
     global STATE_FILE
     keep, STATE_FILE = STATE_FILE, os.path.join(tempfile.gettempdir(), "_bms_legacy.json")
     with open(STATE_FILE, "w") as f:
         json.dump(["a|b"], f)
-    assert load_state() == {"seen": ["a|b"], "shift": None}
+    assert load_state() == {"seen": ["a|b"], "shift": None, "tg_offset": 0}
     os.remove(STATE_FILE)
     STATE_FILE = keep
 
@@ -593,5 +695,7 @@ if __name__ == "__main__":
         demo()
     elif "--test" in sys.argv:
         test_run()
+    elif "--report" in sys.argv:
+        report_now()
     else:
         main()
