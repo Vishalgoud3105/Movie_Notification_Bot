@@ -531,7 +531,9 @@ def test_run():
     global FORMAT
     wanted = FORMAT
     session = requests.Session()
-    today = dt.date.today().strftime("%Y%m%d")
+    # IST, not the runner's clock: on a UTC machine date.today() is yesterday
+    # for most of the Indian evening, and BMS dates are Indian dates.
+    today = dt.datetime.now(IST).strftime("%Y%m%d")
     probe = fetch(session, today)
     if probe is None:
         sys.exit("TEST FAILED: could not reach BMS - the watcher would not work")

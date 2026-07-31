@@ -1,12 +1,18 @@
 name: Watch BMS showtimes
 
 on:
-  schedule:
-    # Every 10 min. GitHub's own cron drifts 5-20 min under load, so this is
-    # really "within ~30 min of opening". The script adds 0-45s jitter so runs
-    # don't land on the exact tick; a sane rate is the single biggest thing
-    # keeping this from looking like a scraper.
-    - cron: '*/10 * * * *'
+  # SCHEDULE DISABLED - BookMyShow returns 403 to GitHub's runners.
+  #
+  # Verified 2026-08-01: both endpoints, all retries, instant 403 from Actions,
+  # while the identical request returns 200 from a home connection. Actions runs
+  # on Azure datacenter IPs and BMS treats datacenter traffic differently. This
+  # is a network-level block; no header or endpoint change gets around it.
+  #
+  # The watcher runs locally instead - see run_watcher.bat and Task Scheduler.
+  # Re-enable by uncommenting if BMS ever starts answering the runners.
+  #
+  # schedule:
+  #   - cron: '*/10 * * * *'
   workflow_dispatch:
 
 # One run at a time, otherwise two runs race on the seen.json cache.
