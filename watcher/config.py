@@ -9,17 +9,18 @@ import datetime as dt
 import os
 
 
-if __name__ == "__main__":
-    if "--selftest" in sys.argv:
-        demo()
-    elif "--test" in sys.argv:
-        test_run()
-    elif "--report" in sys.argv:
-        report_now()
-    elif "--serve" in sys.argv:
-        serve()
-    else:
-        main()
+# Local runs read .env; a host injects the same names as real env vars.
+# Anchored to the repo root rather than the working directory, because a
+# scheduler or service can start this from anywhere - and a .env that is not
+# found means no Telegram at all, which is a silent failure.
+# ponytail: 6 lines instead of a python-dotenv dependency.
+DOTENV = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+if os.path.exists(DOTENV):
+    for _line in open(DOTENV):
+        _line = _line.split("#", 1)[0].strip()
+        if "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
 
 
 # Both verified to return identical payloads. If BMS retires one, the other is

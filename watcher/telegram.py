@@ -35,6 +35,11 @@ def poll_commands(state, wait=0):
     token = os.environ.get("TELEGRAM_API_TOKEN")
     chat = str(os.environ.get("TELEGRAM_CHAT_ID", ""))
     if not (token and chat):
+        # Returning instantly here once turned --serve into a 100%-CPU spin that
+        # silently answered nothing. Say so, and slow down.
+        print("no telegram credentials - cannot read your messages "
+              "(is .env next to the working directory?)")
+        time.sleep(max(wait, 5))
         return []
     # Reading updates gets connection-reset every so often (roughly 1 try in 6
     # here), while sending never does. Without a retry a single reset silently

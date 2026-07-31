@@ -19,6 +19,14 @@ def load_state():
 
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
+    """Write via a temp file and replace, so the state is never half-written.
+
+    Writing in place leaves an empty file for an instant on every save, and if
+    anything dies in that window the next start reads empty JSON and cannot
+    load at all. os.replace is atomic.
+    """
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump({"seen": state.get("seen", []), "shift": state.get("shift"),
                    "tg_offset": state.get("tg_offset", 0)}, f)
+    os.replace(tmp, STATE_FILE)

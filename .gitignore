@@ -20,6 +20,8 @@ seen.json
 GUIDE.md
 run_watcher.bat
 run_hidden.vbs
+run_serve.bat
+run_serve_hidden.vbs
 
 # Local run logs
 logs/
