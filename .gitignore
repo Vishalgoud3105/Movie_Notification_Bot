@@ -16,6 +16,5 @@ Thumbs.db
 # Local notification state (GitHub Actions keeps its own copy in the cache)
 seen.json
 
-GUO
 # Local setup notes, not for the repo
 GUIDE.md
