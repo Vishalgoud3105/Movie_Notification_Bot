@@ -34,18 +34,34 @@ if os.path.exists(".env"):
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 
-API = "https://in.bookmyshow.com/api/movies-data/showtimes-by-event"
+# Both verified to return identical payloads. If BMS retires one, the other is
+# tried automatically. A brand new API with a different contract cannot be
+# guessed - that case exits non-zero instead of pretending to work.
+ENDPOINTS = [
+    "https://in.bookmyshow.com/api/movies-data/showtimes-by-event",
+    "https://in.bookmyshow.com/api/v2/mobile/showtimes/byevent",
+]
 
-EVENT_CODE = os.environ.get("EVENT_CODE", "ET00447840")
+# MUST be the 4DX 3D child code, not the parent ET00447840. Verified: the parent
+# query returns only English 2D shows - the 4DX shows are invisible from it.
+# Each format is its own event as far as this API is concerned.
+EVENT_CODE = os.environ.get("EVENT_CODE", "ET00502630")
 REGION_CODE = os.environ.get("REGION_CODE", "HYD")
 DATES = [d.strip() for d in os.environ.get("DATES", "20260808,20260809").split(",") if d.strip()]
 TIME_FROM = os.environ.get("TIME_FROM", "06:00")
 TIME_TO = os.environ.get("TIME_TO", "20:00")
 VENUES = [v.strip().lower() for v in os.environ.get("VENUES", "").split(",") if v.strip()]
-# 4DX has no child-event of its own yet for this movie, so match it in either
-# the child-event dimension or the venue's show Attributes. Blank = any.
-FORMAT = os.environ.get("FORMAT", "4DX").strip().upper()
-LANGUAGE = os.environ.get("LANGUAGE", "English").strip().upper()
+# "4DX 3D" is its own child event (ET00502630 here) and is NOT the same as plain
+# 4DX or 4DX 2D. Matched against the child-event dimension and the venue's show
+# Attributes, with punctuation stripped so "4DX 3D"/"4DX-3D"/"4DX3D" all hit and
+# "4DX 2D" does not. Blank = any.
+FORMAT = os.environ.get("FORMAT", "4DX 3D")
+LANGUAGE = os.environ.get("LANGUAGE", "English")
+
+
+def squash(s):
+    """'4DX 3D' -> '4DX3D'. Kills spacing/punctuation differences before matching."""
+    return "".join(c for c in s.upper() if c.isalnum())
 MOVIE_SLUG = os.environ.get("MOVIE_SLUG", "spiderman-brand-new-day")
 STATE_FILE = os.environ.get("STATE_FILE", "seen.json")
 
@@ -100,15 +116,60 @@ def fetch(session, date_code):
         "dateCode": date_code,
     }
     for attempt in range(3):
-        try:
-            r = session.get(API, params=params, headers=HEADERS, timeout=25)
-            if r.status_code == 200:
-                return r.json()
-            print("HTTP %s for %s (attempt %d)" % (r.status_code, date_code, attempt + 1))
-        except (requests.RequestException, ValueError) as e:
-            print("request error for %s: %s" % (date_code, e))
+        for url in ENDPOINTS:
+            try:
+                r = session.get(url, params=params, headers=HEADERS, timeout=25)
+                if r.status_code == 200:
+                    data = r.json()
+                    if url is not ENDPOINTS[0]:
+                        print("note: primary endpoint failed, served by %s" % url)
+                    return data
+                print("HTTP %s for %s from %s (attempt %d)"
+                      % (r.status_code, date_code, url.rsplit("/", 1)[-1], attempt + 1))
+            except (requests.RequestException, ValueError) as e:
+                print("request error for %s from %s: %s" % (date_code, url.rsplit("/", 1)[-1], e))
         time.sleep(5 * (attempt + 1) + random.uniform(0, 4))
     return None
+
+
+def walk(node):
+    """Every dict anywhere in a JSON structure, at any depth."""
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            for d in walk(v):
+                yield d
+    elif isinstance(node, list):
+        for v in node:
+            for d in walk(v):
+                yield d
+
+
+def find_venues(data):
+    """[(venue_name, [show dicts])] found by shape rather than by fixed path.
+
+    Fallback for when BMS renames or re-nests its response: look for any object
+    pairing a venue-name string with a list of showtime records. Survives
+    restructuring. It cannot survive a genuinely new API with a new contract -
+    that case must fail loudly rather than quietly report nothing.
+    """
+    found = []
+    for node in walk(data):
+        name = next((v for k, v in node.items()
+                     if "VENUE" in k.upper() and "NAME" in k.upper() and isinstance(v, str)), None)
+        shows = next((v for k, v in node.items()
+                      if isinstance(v, list) and v and isinstance(v[0], dict)
+                      and any(kk.upper() == "SHOWTIME" for kk in v[0])), None)
+        if name and shows:
+            found.append((name, shows))
+    return found
+
+
+def find_variants(data):
+    """{event code: 'English 4DX 3D'} for every child event anywhere in the payload."""
+    return {d["EventCode"]: "%s %s" % (d.get("EventLang", ""), d.get("EventDimension", ""))
+            for d in walk(data)
+            if d.get("EventCode") and ("EventLang" in d or "EventDimension" in d)}
 
 
 def shows_for(data, date_code):
@@ -119,25 +180,36 @@ def shows_for(data, date_code):
     the response must be checked or every run reports a false opening.
     """
     lo, hi = to_minutes(TIME_FROM), to_minutes(TIME_TO)
-    details = data.get("ShowDetails") or []
-    if not details:
-        return []
-    if str(details[0].get("Date")) != date_code:
-        print("%s not open yet (API served %s)" % (date_code, details[0].get("Date")))
-        return []
+    details = (data or {}).get("ShowDetails") or []
 
-    event = details[0].get("Event") or {}
-    children = event.get("ChildEvents") if isinstance(event, dict) else event
+    if details:
+        if str(details[0].get("Date")) != date_code:
+            print("%s not open yet (API served %s)" % (date_code, details[0].get("Date")))
+            return []
+        venues = [(v.get("VenueName", "?"), v.get("ShowTimes") or [])
+                  for v in details[0].get("Venues") or []]
+    else:
+        # Expected layout gone. Try to read it by shape before giving up.
+        venues = find_venues(data)
+        if venues:
+            print("WARNING: BMS response layout changed - using tolerant parse. "
+                  "Verify the alert against the site before trusting it.")
+
     # showtimes carry their own EventCode -> language/format lives on the child event
-    variants = {c["EventCode"]: "%s %s" % (c.get("EventLang", ""), c.get("EventDimension", ""))
-                for c in (children or [])}
+    variants = find_variants(data)
 
     out = []
-    for venue in details[0].get("Venues") or []:
-        name = venue.get("VenueName", "?")
+    for name, showtimes in venues:
         if VENUES and not any(v in name.lower() for v in VENUES):
             continue
-        for show in venue.get("ShowTimes") or []:
+        for show in showtimes:
+            # Per-show date guard. Matters most on the tolerant path, where the
+            # top-level Date check above was not available to run.
+            stamp = next((v for k, v in show.items() if k.upper() == "SHOWDATECODE"), None)
+            if stamp and str(stamp) != date_code:
+                continue
+            if not details and not stamp:
+                continue    # drifted layout with no date evidence at all - refuse to guess
             when = show.get("ShowTime", "")
             try:
                 mins = to_minutes(when)
@@ -147,10 +219,10 @@ def shows_for(data, date_code):
                 continue
             variant = variants.get(show.get("EventCode"), "").strip()
             attrs = (show.get("Attributes") or "").strip()
-            label = ("%s %s" % (variant, attrs)).upper()
-            if FORMAT and FORMAT not in label:
+            label = squash("%s %s" % (variant, attrs))
+            if FORMAT and squash(FORMAT) not in label:
                 continue
-            if LANGUAGE and LANGUAGE not in label:
+            if LANGUAGE and squash(LANGUAGE) not in label:
                 continue
             key = "|".join([date_code, name, when, show.get("EventCode", ""), attrs])
             sold_out = show.get("Availability") == "S"
@@ -226,10 +298,66 @@ def main():
         sys.exit("could not reach BMS for %s - watcher is NOT working" % ", ".join(broken))
 
 
+def test_run():
+    """Manual smoke test: prove the whole chain end to end, right now.
+
+    A strict test would find no 4DX 3D shows (none are scheduled anywhere yet),
+    send nothing, and prove nothing. So this looks at dates that ARE open and
+    relaxes the format filter if it has to, guaranteeing a real message arrives.
+    Never touches seen.json, so it cannot suppress the real alert later.
+    """
+    global FORMAT
+    wanted = FORMAT
+    session = requests.Session()
+    today = dt.date.today().strftime("%Y%m%d")
+    probe = fetch(session, today)
+    if probe is None:
+        sys.exit("TEST FAILED: could not reach BMS - the watcher would not work")
+
+    # Scan open dates until real matching shows turn up - the first open date
+    # often has none in this format, which would make for a useless test.
+    open_dates = [d["DateCode"] for d in probe.get("ShowDatesArray", [])
+                  if not d.get("isDisabled")][:6] or [today]
+    print("open dates on BMS: %s" % open_dates)
+    payloads, dates, hits = {today: probe}, [], []
+    for dc in open_dates:
+        if dc not in payloads:
+            time.sleep(random.uniform(4, 11))
+            payloads[dc] = fetch(session, dc)
+        dates.append(dc)
+        found = [(dc, t) for _, t in shows_for(payloads.get(dc), dc)]
+        print("  %s: %d matching shows" % (dc, len(found)))
+        hits += found
+        if hits:
+            break
+
+    relaxed = False
+    if not hits:
+        FORMAT, relaxed = "", True      # nothing in this format anywhere - show something real
+        hits = [(dc, t) for dc in dates for _, t in shows_for(payloads.get(dc), dc)]
+
+    lines = ["TEST RUN - if this reached your phone, the alert chain works."]
+    if relaxed:
+        lines.append("\nNo '%s' shows exist on any open date yet, so these are other "
+                     "%s shows, listed only to prove delivery." % (wanted, LANGUAGE or "available"))
+    lines.append("\nThe real watcher is armed for: %s on %s, %s-%s, %s %s."
+                 % (EVENT_CODE, " & ".join(DATES), TIME_FROM, TIME_TO, LANGUAGE, wanted))
+    if hits:
+        for dc in dates:
+            day = [t for d, t in hits if d == dc][:8]
+            if day:
+                lines.append("\n%s:" % dt.datetime.strptime(dc, "%Y%m%d").strftime("%a %d %b"))
+                lines.extend("  " + t for t in day)
+    else:
+        lines.append("\n(No shows found at all - check EVENT_CODE and REGION_CODE.)")
+    send_telegram("\n".join(lines))
+    print("test message sent; seen.json untouched")
+
+
 def demo():
     """Self-check for the real logic: date guard, time window, format filter."""
     global FORMAT, LANGUAGE, VENUES
-    VENUES = []
+    VENUES, FORMAT, LANGUAGE = [], "4DX 3D", "English"   # pinned: never read .env
     assert to_minutes("07:10 PM") == 19 * 60 + 10
     assert to_minutes("08:00 AM") == 480
     assert to_minutes("23:45") == 23 * 60 + 45
@@ -256,8 +384,24 @@ def demo():
     assert sorted(texts) == sorted([
         "10:00 AM - PVR Nexus Mall [English 4DX 3D]",
         "07:10 PM - PVR Nexus Mall [English 4DX 3D] (SOLD OUT)",
-        "09:00 AM - AMB Cinemas [English 3D / ENGLISH 4DX]",
-    ]), texts       # 11:30 PM out of window, plain 3D and Telugu 4DX filtered out
+    ]), texts   # 11:30 PM out of window; plain 3D, Telugu 4DX 3D and bare 4DX all rejected
+
+    # Same payload re-nested and renamed: the tolerant parse must still find it.
+    drifted = {"data": {"page": {"cinemaList": [
+        {"venueName": "PVR Nexus Mall", "sessions": [
+            {"ShowTime": "10:00 AM", "EventCode": "E4DX", "Attributes": "",
+             "Availability": "A", "ShowDateCode": "20260808"},
+            {"ShowTime": "09:00 AM", "EventCode": "E4DX", "Attributes": "",
+             "Availability": "A", "ShowDateCode": "20260807"}]}]}},
+        "events": [{"EventCode": "E4DX", "EventLang": "English", "EventDimension": "4DX 3D"}]}
+    texts = [t for _, t in shows_for(drifted, "20260808")]
+    assert texts == ["10:00 AM - PVR Nexus Mall [English 4DX 3D]"], texts   # wrong day dropped
+
+    # Drifted layout with no date evidence must stay silent, never guess.
+    assert shows_for({"x": [{"venueName": "V", "sessions": [
+        {"ShowTime": "10:00 AM", "EventCode": "E4DX"}]}],
+        "events": [{"EventCode": "E4DX", "EventLang": "English",
+                    "EventDimension": "4DX 3D"}]}, "20260808") == []
 
     FORMAT, LANGUAGE = "", ""       # blank filters = report everything
     assert len(shows_for(payload, "20260808")) == 5
@@ -265,4 +409,9 @@ def demo():
 
 
 if __name__ == "__main__":
-    demo() if "--selftest" in sys.argv else main()
+    if "--selftest" in sys.argv:
+        demo()
+    elif "--test" in sys.argv:
+        test_run()
+    else:
+        main()
