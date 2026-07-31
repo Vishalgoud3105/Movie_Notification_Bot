@@ -43,4 +43,7 @@ jobs:
           TIME_TO: '20:00'
           FORMAT: '4DX 3D'
           LANGUAGE: English
-        run: python bms_watch.py
+        # Manual run ("Run workflow" button) = --test, which always sends a
+        # message so you can confirm delivery. Every scheduled run is the real
+        # watcher: silent until 8-9 Aug open, then one real alert.
+        run: python bms_watch.py ${{ github.event_name == 'workflow_dispatch' && '--test' || '' }}

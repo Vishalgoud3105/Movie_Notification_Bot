@@ -63,6 +63,7 @@ def squash(s):
     """'4DX 3D' -> '4DX3D'. Kills spacing/punctuation differences before matching."""
     return "".join(c for c in s.upper() if c.isalnum())
 MOVIE_SLUG = os.environ.get("MOVIE_SLUG", "spiderman-brand-new-day")
+MOVIE_NAME = os.environ.get("MOVIE_NAME", "Spider-Man: Brand New Day")
 STATE_FILE = os.environ.get("STATE_FILE", "seen.json")
 
 # Stable per-install device identity. A device id that changes every run looks
@@ -225,12 +226,77 @@ def shows_for(data, date_code):
             if LANGUAGE and squash(LANGUAGE) not in label:
                 continue
             key = "|".join([date_code, name, when, show.get("EventCode", ""), attrs])
-            sold_out = show.get("Availability") == "S"
-            out.append((key, "%s - %s%s%s" % (
-                when, name,
-                " [%s]" % " / ".join(x for x in (variant, attrs) if x) if (variant or attrs) else "",
-                " (SOLD OUT)" if sold_out else "")))
+            out.append((key, {
+                "venue": name,
+                "time": when,
+                "mins": mins,
+                "sold": show.get("Availability") == "S",
+                "format": " / ".join(x for x in (variant, attrs) if x),
+                "price": show.get("MinPrice") or "",
+            }))
     return out
+
+
+# Screen-brand noise BMS bakes into venue names ("PVR Superplex Inorbit: LUXE,
+# PXL, 4DX: Cyberabad"). Dropped for readability; the format is in the header.
+SCREEN_WORDS = {"LUXE", "PXL", "4DX", "IMAX", "GOLD", "ONYX", "INSIGNIA", "PLAYHOUSE",
+                "DIRECTOR'S CUT", "SUPERPLEX", "P[XL]", "ICE", "MX4D", "EPIQ"}
+
+
+def short_venue(name):
+    """'PVR Superplex Inorbit: LUXE, PXL, 4DX: Cyberabad' -> 'PVR Superplex Inorbit, Cyberabad'."""
+    parts = []
+    for chunk in name.split(":"):
+        chunk = chunk.strip()
+        # drop chunks that are nothing but screen-brand names
+        if chunk and not all(w.strip().upper() in SCREEN_WORDS for w in chunk.split(",") if w.strip()):
+            parts.append(chunk)
+    # "PVR" + "Irrum Manzil" reads as one name, not two: merge a short brand prefix
+    if len(parts) > 1 and len(parts[0]) <= 4:
+        parts[:2] = ["%s %s" % (parts[0], parts[1])]
+    out = ", ".join(parts) if parts else name
+    for tail in (", Hyderabad", " Hyderabad"):
+        if out.endswith(tail):
+            out = out[: -len(tail)]
+    return out.strip(" ,")
+
+
+def pretty_date(date_code):
+    """'20260808' -> 'Saturday, 8 Aug'."""
+    d = dt.datetime.strptime(date_code, "%Y%m%d")
+    return "%s, %d %s" % (d.strftime("%A"), d.day, d.strftime("%b"))
+
+
+def format_days(by_date):
+    """One block per date, grouped by cinema, times on one line. No repetition."""
+    lines = []
+    for date_code in sorted(by_date):
+        shows = by_date[date_code]
+        if not shows:
+            continue
+        lines.append("\n%s" % pretty_date(date_code))
+        for venue in sorted({s["venue"] for s in shows}):
+            at = sorted([s for s in shows if s["venue"] == venue], key=lambda s: s["mins"])
+            times = ", ".join(s["time"] + (" (sold out)" if s["sold"] else "") for s in at)
+            available = [s for s in at if not s["sold"]]
+            prices = {s["price"] for s in available if s["price"]}
+            lines.append("  %s" % short_venue(venue))
+            lines.append("     %s" % times)
+            if prices:
+                lines.append("     from Rs.%s" % min(prices, key=lambda p: float(p or 0)).split(".")[0])
+        lines.append("  Book: https://in.bookmyshow.com/movies/%s/buytickets/%s/%s"
+                     % (MOVIE_SLUG, EVENT_CODE, date_code))
+    return lines
+
+
+def alert_text(by_date):
+    """THE real alert. test_run() renders this verbatim so you see it in advance."""
+    n = sum(len(v) for v in by_date.values())
+    return "\n".join([
+        "TICKETS ARE OPEN - book now",
+        "%s | %s %s" % (MOVIE_NAME, LANGUAGE, FORMAT),
+        "%d show%s between %s and %s" % (n, "" if n == 1 else "s", TIME_FROM, TIME_TO),
+    ] + format_days(by_date))
 
 
 def send_telegram(text):
@@ -276,15 +342,10 @@ def main():
                 fresh.append((date_code, text))
 
     if fresh:
-        lines = ["BOOKINGS OPEN - shows between %s and %s:" % (TIME_FROM, TIME_TO)]
-        for date_code in DATES:
-            day = [t for d, t in fresh if d == date_code]
-            if day:
-                lines.append("\n%s:" % dt.datetime.strptime(date_code, "%Y%m%d").strftime("%a %d %b"))
-                lines.extend("  " + t for t in day)
-                lines.append("  book: https://in.bookmyshow.com/movies/%s/buytickets/%s/%s"
-                             % (MOVIE_SLUG, EVENT_CODE, date_code))
-        send_telegram("\n".join(lines))
+        by_date = {}
+        for date_code, show in fresh:
+            by_date.setdefault(date_code, []).append(show)
+        send_telegram(alert_text(by_date))
     else:
         print("nothing new")
 
@@ -336,20 +397,33 @@ def test_run():
         FORMAT, relaxed = "", True      # nothing in this format anywhere - show something real
         hits = [(dc, t) for dc in dates for _, t in shows_for(payloads.get(dc), dc)]
 
-    lines = ["TEST RUN - if this reached your phone, the alert chain works."]
+    FORMAT = wanted     # restore, so the preview below shows the real filter
+    lines = ["TEST OK - alerts reach this chat.",
+             "",
+             "WHAT I'M WATCHING FOR YOU",
+             "  Movie:  %s" % MOVIE_NAME,
+             "  Format: %s %s only" % (LANGUAGE, wanted),
+             "  Dates:  %s" % " and ".join(pretty_date(d) for d in DATES),
+             "  Shows:  starting between %s and %s" % (TIME_FROM, TIME_TO),
+             "  City:   %s" % REGION_CODE,
+             "",
+             "Those dates are NOT open on BookMyShow yet. I check every few",
+             "minutes and will message you once, the moment they open.",
+             "",
+             "vvvvv  EXACTLY what that message will look like  vvvvv",
+             "(real data, but from %s - an already-open date)" % pretty_date(dates[-1])]
     if relaxed:
-        lines.append("\nNo '%s' shows exist on any open date yet, so these are other "
-                     "%s shows, listed only to prove delivery." % (wanted, LANGUAGE or "available"))
-    lines.append("\nThe real watcher is armed for: %s on %s, %s-%s, %s %s."
-                 % (EVENT_CODE, " & ".join(DATES), TIME_FROM, TIME_TO, LANGUAGE, wanted))
+        lines.append("NOTE: no %s shows exist on any open date right now, so this" % wanted)
+        lines.append("preview falls back to other formats just to prove delivery.")
+    lines.append("")
     if hits:
-        for dc in dates:
-            day = [t for d, t in hits if d == dc][:8]
-            if day:
-                lines.append("\n%s:" % dt.datetime.strptime(dc, "%Y%m%d").strftime("%a %d %b"))
-                lines.extend("  " + t for t in day)
+        by_date = {}
+        for dc, show in hits:
+            by_date.setdefault(dc, []).append(show)
+        lines.append(alert_text(by_date))
     else:
-        lines.append("\n(No shows found at all - check EVENT_CODE and REGION_CODE.)")
+        lines.append("No shows found at all - check EVENT_CODE and REGION_CODE.")
+    lines.append("\n^^^^^  end of preview  ^^^^^")
     send_telegram("\n".join(lines))
     print("test message sent; seen.json untouched")
 
@@ -380,11 +454,11 @@ def demo():
                 {"ShowTime": "03:00 PM", "EventCode": "ETEL", "Attributes": "", "Availability": "A"}]},
             {"VenueName": "AMB Cinemas", "ShowTimes": [
                 {"ShowTime": "09:00 AM", "EventCode": "E3D", "Attributes": "ENGLISH 4DX", "Availability": "A"}]}]}]}
-    texts = [t for _, t in shows_for(payload, "20260808")]
-    assert sorted(texts) == sorted([
-        "10:00 AM - PVR Nexus Mall [English 4DX 3D]",
-        "07:10 PM - PVR Nexus Mall [English 4DX 3D] (SOLD OUT)",
-    ]), texts   # 11:30 PM out of window; plain 3D, Telugu 4DX 3D and bare 4DX all rejected
+    got = [s for _, s in shows_for(payload, "20260808")]
+    # 11:30 PM out of window; plain 3D, Telugu 4DX 3D and bare 4DX all rejected
+    assert sorted((s["time"], s["sold"]) for s in got) == [
+        ("07:10 PM", True), ("10:00 AM", False)], got
+    assert all(s["format"] == "English 4DX 3D" for s in got), got
 
     # Same payload re-nested and renamed: the tolerant parse must still find it.
     drifted = {"data": {"page": {"cinemaList": [
@@ -394,8 +468,14 @@ def demo():
             {"ShowTime": "09:00 AM", "EventCode": "E4DX", "Attributes": "",
              "Availability": "A", "ShowDateCode": "20260807"}]}]}},
         "events": [{"EventCode": "E4DX", "EventLang": "English", "EventDimension": "4DX 3D"}]}
-    texts = [t for _, t in shows_for(drifted, "20260808")]
-    assert texts == ["10:00 AM - PVR Nexus Mall [English 4DX 3D]"], texts   # wrong day dropped
+    got = [s for _, s in shows_for(drifted, "20260808")]
+    assert [s["time"] for s in got] == ["10:00 AM"], got   # wrong day dropped
+
+    # venue names must lose the screen-brand noise but keep the location
+    assert short_venue("PVR Superplex Inorbit: LUXE, PXL, 4DX: Cyberabad") \
+        == "PVR Superplex Inorbit, Cyberabad"
+    assert short_venue("PVR: Irrum Manzil, Hyderabad") == "PVR Irrum Manzil"
+    assert short_venue("AAA Cinemas: Ameerpet") == "AAA Cinemas, Ameerpet"
 
     # Drifted layout with no date evidence must stay silent, never guess.
     assert shows_for({"x": [{"venueName": "V", "sessions": [
