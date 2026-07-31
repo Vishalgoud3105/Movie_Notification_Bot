@@ -1,0 +1,17 @@
+# Virtual environment
+/dsica/
+
+# Byte-compiled Python files
+__pycache__/
+*.pyc
+*.pyo
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Private credentials
+.env
+
+# Local notification state (GitHub Actions keeps its own copy in the cache)
+seen.json

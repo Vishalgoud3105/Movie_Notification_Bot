@@ -1,32 +1,46 @@
-name: Check Showtimes
+name: Watch BMS showtimes
+
 on:
   schedule:
-    # Runs every 5 minutes
-    - cron: '*/5 * * * *'
-  # Allows manual runs from the Actions tab
+    # Every 10 min. GitHub's own cron drifts 5-20 min under load, so this is
+    # really "within ~30 min of opening". The script adds 0-45s jitter so runs
+    # don't land on the exact tick; a sane rate is the single biggest thing
+    # keeping this from looking like a scraper.
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
+# One run at a time, otherwise two runs race on the seen.json cache.
+concurrency:
+  group: bms-watch
+  cancel-in-progress: false
+
 jobs:
-  check-for-shows:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v2
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.12'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
-      - name: Run Python script
-        env:
+      # Carries seen.json between runs so you get notified once, not every 20 min.
+      - uses: actions/cache@v4
+        with:
+          path: seen.json
+          key: bms-seen-${{ github.run_id }}
+          restore-keys: bms-seen-
+
+      - env:
           TELEGRAM_API_TOKEN: ${{ secrets.TELEGRAM_API_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          MOVIE_CODE: ${{ secrets.MOVIE_CODE }}
-          CITY_CODE: ${{ secrets.CITY_CODE }}
-        run: python demon_slayer_ticket_notification.py
+          EVENT_CODE: ET00447840
+          REGION_CODE: HYD
+          DATES: '20260808,20260809'
+          TIME_FROM: '06:00'
+          TIME_TO: '20:00'
+          FORMAT: 4DX
+          LANGUAGE: English
+        run: python bms_watch.py
