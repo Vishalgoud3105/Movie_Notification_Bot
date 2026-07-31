@@ -19,6 +19,7 @@ seen.json
 # Local setup notes, not for the repo
 GUIDE.md
 run_watcher.bat
+run_hidden.vbs
 
 # Local run logs
 logs/
