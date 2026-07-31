@@ -274,17 +274,18 @@ def format_days(by_date):
         shows = by_date[date_code]
         if not shows:
             continue
-        lines.append("\n%s" % pretty_date(date_code))
+        lines.append("\n📅 %s" % pretty_date(date_code))
         for venue in sorted({s["venue"] for s in shows}):
             at = sorted([s for s in shows if s["venue"] == venue], key=lambda s: s["mins"])
-            times = ", ".join(s["time"] + (" (sold out)" if s["sold"] else "") for s in at)
+            times = ", ".join(s["time"] + (" ❌" if s["sold"] else "") for s in at)
             available = [s for s in at if not s["sold"]]
             prices = {s["price"] for s in available if s["price"]}
-            lines.append("  %s" % short_venue(venue))
-            lines.append("     %s" % times)
+            lines.append("  🎬 %s" % short_venue(venue))
+            lines.append("     🕒 %s" % times)
             if prices:
-                lines.append("     from Rs.%s" % min(prices, key=lambda p: float(p or 0)).split(".")[0])
-        lines.append("  Book: https://in.bookmyshow.com/movies/%s/buytickets/%s/%s"
+                lines.append("     💰 from ₹%s"
+                             % min(prices, key=lambda p: float(p or 0)).split(".")[0])
+        lines.append("  🔗 https://in.bookmyshow.com/movies/%s/buytickets/%s/%s"
                      % (MOVIE_SLUG, EVENT_CODE, date_code))
     return lines
 
@@ -293,10 +294,12 @@ def alert_text(by_date):
     """THE real alert. test_run() renders this verbatim so you see it in advance."""
     n = sum(len(v) for v in by_date.values())
     return "\n".join([
-        "TICKETS ARE OPEN - book now",
-        "%s | %s %s" % (MOVIE_NAME, LANGUAGE, FORMAT),
-        "%d show%s between %s and %s" % (n, "" if n == 1 else "s", TIME_FROM, TIME_TO),
-    ] + format_days(by_date))
+        "🚨🕷️ IT'S LIVE! %s %s TICKETS ARE OPEN! 🕷️🚨" % (LANGUAGE.upper(), FORMAT),
+        "",
+        "🍿 %s" % MOVIE_NAME,
+        "🎟️ %d show%s between %s and %s" % (n, "" if n == 1 else "s", TIME_FROM, TIME_TO),
+        "⚡ GO BOOK NOW - 4DX sells out fast!",
+    ] + format_days(by_date) + ["", "❌ = already sold out"])
 
 
 def send_telegram(text):
@@ -398,24 +401,26 @@ def test_run():
         hits = [(dc, t) for dc in dates for _, t in shows_for(payloads.get(dc), dc)]
 
     FORMAT = wanted     # restore, so the preview below shows the real filter
-    lines = ["TEST OK - alerts reach this chat.",
+    lines = ["✅ TEST PASSED - alerts will reach this chat! 📲",
              "",
-             "WHAT I'M WATCHING FOR YOU",
-             "  Movie:  %s" % MOVIE_NAME,
-             "  Format: %s %s only" % (LANGUAGE, wanted),
-             "  Dates:  %s" % " and ".join(pretty_date(d) for d in DATES),
-             "  Shows:  starting between %s and %s" % (TIME_FROM, TIME_TO),
-             "  City:   %s" % REGION_CODE,
+             "🎯 WHAT I'M WATCHING FOR YOU",
+             "  🍿 Movie:  %s" % MOVIE_NAME,
+             "  🕶️ Format: %s %s ONLY" % (LANGUAGE, wanted),
+             "  📅 Dates:  %s" % " and ".join(pretty_date(d) for d in DATES),
+             "  🕒 Shows:  starting between %s and %s" % (TIME_FROM, TIME_TO),
+             "  📍 City:   %s" % REGION_CODE,
              "",
-             "Those dates are NOT open on BookMyShow yet. I check every few",
-             "minutes and will message you once, the moment they open.",
+             "🔒 Those dates are NOT open on BookMyShow yet.",
+             "👀 I'm checking every few minutes and will ping you ONCE,",
+             "   the very moment they open. Sit back.",
              "",
-             "vvvvv  EXACTLY what that message will look like  vvvvv",
-             "(real data, but from %s - an already-open date)" % pretty_date(dates[-1])]
+             "👇👇 EXACTLY what that alert will look like 👇👇",
+             "(real data, from %s - a date that's already open)" % pretty_date(dates[-1])]
     if relaxed:
-        lines.append("NOTE: no %s shows exist on any open date right now, so this" % wanted)
+        lines.append("⚠️ No %s shows exist on any open date right now, so this" % wanted)
         lines.append("preview falls back to other formats just to prove delivery.")
     lines.append("")
+    lines.append("- - - - - - - - - - - - - - - - - - - -")
     if hits:
         by_date = {}
         for dc, show in hits:
@@ -423,7 +428,8 @@ def test_run():
         lines.append(alert_text(by_date))
     else:
         lines.append("No shows found at all - check EVENT_CODE and REGION_CODE.")
-    lines.append("\n^^^^^  end of preview  ^^^^^")
+    lines.append("- - - - - - - - - - - - - - - - - - - -")
+    lines.append("☝️ end of preview - the real one lands on 8-9 Aug 🤞")
     send_telegram("\n".join(lines))
     print("test message sent; seen.json untouched")
 
