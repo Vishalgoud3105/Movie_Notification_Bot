@@ -422,15 +422,22 @@ def poll_commands(state):
     chat = str(os.environ.get("TELEGRAM_CHAT_ID", ""))
     if not (token and chat):
         return []
-    try:
-        # POST, not GET: a GET with these params gets connection-reset on some
-        # networks, while POST is accepted everywhere. Telegram allows both.
-        r = requests.post("https://api.telegram.org/bot%s/getUpdates" % token,
-                          json={"offset": state.get("tg_offset", 0), "timeout": 0},
-                          timeout=20)
-        updates = r.json().get("result", []) if r.status_code == 200 else []
-    except (requests.RequestException, ValueError) as e:
-        print("could not read telegram commands: %s" % e)
+    # Reading updates gets connection-reset every so often (roughly 1 try in 6
+    # here), while sending never does. Without a retry a single reset silently
+    # drops your command and you wait 10 minutes for a reply that never comes.
+    # POST rather than GET: GET with these params is reset far more often.
+    updates = None
+    for attempt in range(3):
+        try:
+            r = requests.post("https://api.telegram.org/bot%s/getUpdates" % token,
+                              json={"offset": state.get("tg_offset", 0), "timeout": 0},
+                              timeout=20)
+            updates = r.json().get("result", []) if r.status_code == 200 else []
+            break
+        except (requests.RequestException, ValueError) as e:
+            print("could not read telegram commands (attempt %d): %s" % (attempt + 1, e))
+            time.sleep(2 * (attempt + 1))
+    if updates is None:
         return []
 
     commands = []
