@@ -18,6 +18,7 @@ seen.json
 
 # Local setup notes, not for the repo
 GUIDE.md
+CHECKPOINT.md
 run_watcher.bat
 run_hidden.vbs
 

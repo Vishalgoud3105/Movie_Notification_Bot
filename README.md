@@ -1,74 +1,113 @@
 # Movie Notification Bot 🕷️
 
 Watches BookMyShow and pings Telegram the moment tickets open for a specific
-movie, on specific dates, in a specific format — then shuts up again.
+movie, on specific dates, in a specific format — then goes quiet again.
 
-Current target: **Spider-Man: Brand New Day**, Hyderabad, **8–9 Aug 2026**,
-**English 4DX 3D**, shows starting **06:00–20:00**.
+Current target: **Spider-Man: Brand New Day**, Hyderabad, **English 4DX 3D**,
+**8–9 Aug 2026**, shows starting **06:00–20:00**.
 
-## Why it doesn't get blocked
+## Why the old version was blocked
 
-The old version scraped the BMS website HTML. That page returns **403 to any
+It scraped the BookMyShow website HTML. That page returns **403 to any
 non-browser client** — verified, even from a residential IP with a real Chrome
-user-agent. No amount of header spoofing fixes it, because the block is on the
-request pattern, not the header string.
+user-agent. Header spoofing cannot fix it: the page expects a real browser to
+run a JS challenge and present a browser TLS fingerprint, and Python can fake
+neither. The parsed markup (`li.list-item`, `a.__name`) had also stopped
+existing when BMS became a single-page app.
 
-This version talks to the **same JSON API the BookMyShow Android app uses**
-(`/api/movies-data/showtimes-by-event`). It answers a well-formed app request
-normally. On top of that:
+Two more faults meant the old workflow never even reached BMS:
+`requirements.txt` listed the stdlib modules `time` and `datetime`, so
+`pip install` failed, and the workflow invoked `demon_slayer_bot.py`, which
+did not exist.
 
-- one request per date instead of a full page render
-- a stable device id (`x-bms-id`) instead of a fresh identity every run
-- 0–45 s startup jitter so runs don't land on the exact cron tick
-- 4–11 s gap between dates
-- 3 retries with backoff, session reuse (keep-alive)
-- 10-minute polling, not 1-minute hammering
+## How this version works
 
-Personal, low-rate, read-only use. Don't crank the schedule.
+It calls the **same JSON API the BookMyShow Android app uses**, which answers a
+well-formed app request normally. It is one request per date instead of a full
+page render. On top of that:
 
-## The trap this bot avoids
+- a stable device id (`x-bms-id`) rather than a new identity every run
+- 0–45 s startup jitter, 4–11 s between dates
+- 3 retries with backoff, session reuse, and a second known endpoint as fallback
+- polling every 10 minutes, not every minute
 
-**BMS does not 404 a date that isn't open yet — it silently returns *today's*
-showtimes instead.** A naive watcher sees a full venue list for "Aug 8", fires
-"BOOKINGS OPEN!", and is wrong. So every response is checked:
+Personal, low-rate, read-only use. It watches; it never books, holds or buys.
+
+## Two traps this bot avoids
+
+**1. BMS does not 404 a date that isn't open yet — it silently returns *today's*
+showtimes instead.** A naive watcher sees a full venue list for "8 Aug", fires
+"BOOKINGS OPEN!", and is wrong. Every response is checked:
 
 ```python
 if str(details[0].get("Date")) != date_code:   # served a different day = not open
     return []
 ```
 
-`ShowDatesArray[].isDisabled` mirrors the greyed-out dates you see on the site,
-and is logged each run so you can watch the booking window creep toward your date.
+**2. The parent movie code does not expose every format.** Querying
+`ET00447840` returns only English 2D — the 4DX 3D shows are invisible from it.
+Each format is its own event, so the bot watches **`ET00502630`** (English
+4DX 3D) directly. Verified on 5 Aug: the parent reported 36 English 2D shows
+and zero 4DX, while the child reported 4DX 3D at three PVR screens.
 
-## Failure is loud, silence is trustworthy
+## Silence is trustworthy, failure is loud
 
 "Couldn't reach BMS" and "not open yet" look identical from outside, and the
 first one silently loses you the tickets. So an unreachable BMS **exits
-non-zero** — GitHub marks the run failed and emails you. If the bot is quiet,
-it genuinely means "not open yet".
+non-zero**. If the bot is quiet, it genuinely means "not open yet".
+
+## Where it runs
+
+**Locally, via Windows Task Scheduler — not GitHub Actions.**
+
+BMS returns 403 to GitHub's runners. Verified twice on two different runners:
+both endpoints, every retry, instant 403, while the identical request returns
+200 from a home connection. Actions runs on Azure datacenter IPs and BMS treats
+datacenter traffic differently. It is a network-level block, so no header or
+endpoint change avoids it.
+
+The workflow file is kept with its cron commented out and `workflow_dispatch`
+still enabled, purely so the block can be re-probed later.
 
 ## Setup
 
-1. `pip install -r requirements.txt`
-2. `cp .env.example .env`, fill in your Telegram token + chat id (`.env` is gitignored)
-3. `python bms_watch.py --selftest` — offline logic check
-4. `python bms_watch.py` — one real run
+```bash
+pip install -r requirements.txt
+cp .env.example .env          # then fill in your own values
+python bms_watch.py --selftest   # offline logic check, no network
+python bms_watch.py --test       # sends a test message + a preview of the real alert
+python bms_watch.py              # one real check
+python bms_watch.py --report     # status report right now
+```
 
-For GitHub Actions, add `TELEGRAM_API_TOKEN` and `TELEGRAM_CHAT_ID` under
-**Settings → Secrets and variables → Actions**. Everything else lives in
-`.github/workflows/schedule.yml`.
+Scheduled run every 10 minutes (Windows):
 
-> ⚠️ **Scheduled workflows only run on the repository's default branch.** On any
-> other branch the workflow exists but never fires. Merge to the default branch
-> before you rely on it.
+```powershell
+Get-ScheduledTaskInfo   -TaskName "BMS Spiderman 4DX Watcher"   # last/next run
+Start-ScheduledTask     -TaskName "BMS Spiderman 4DX Watcher"   # force a check
+Disable-ScheduledTask   -TaskName "BMS Spiderman 4DX Watcher"   # pause
+Unregister-ScheduledTask -TaskName "BMS Spiderman 4DX Watcher"  # remove
+```
 
-Notification state (`seen.json`) rides in the Actions cache, so you get told
-once, not every 10 minutes.
+## Messages you'll get
 
-## Shift reports
+**The alert** — once, when tickets open:
 
-So you always know it's alive, the bot files a report at the end of each shift
-(IST — Actions runs in UTC, so the offset is applied explicitly):
+```
+🚨🕷️ IT'S LIVE! ENGLISH 4DX 3D TICKETS ARE OPEN! 🕷️🚨
+
+🍿 Spider-Man: Brand New Day
+🎟️ 12 shows between 06:00 and 20:00
+⚡ GO BOOK NOW - 4DX sells out fast!
+
+📅 Saturday, 8 Aug
+  🎬 PVR Superplex Inorbit, Cyberabad
+     🕒 10:25 AM, 01:25 PM, 04:30 PM, 08:00 PM
+     💰 from ₹350
+  🔗 https://in.bookmyshow.com/movies/...
+```
+
+**Shift reports** — automatic, at the end of each IST shift:
 
 | Shift | Window |
 |---|---|
@@ -77,30 +116,39 @@ So you always know it's alive, the bot files a report at the end of each shift
 | Evening | 18:00–21:00 |
 | Night | 21:00–24:00 |
 
-Each report gives the number of checks run, first and last check time, whether
-BMS was reachable, how far ahead BMS is currently selling, and per-date status
-for 8 and 9 Aug. The report for a shift is sent by the first run of the *next*
-shift, so a missing report means the workflow itself stopped — that absence is
-a signal worth acting on.
+Each gives checks run, first/last check time, whether BMS was reachable, how far
+ahead BMS is currently selling, and per-date status. Watch the
+`📆 BMS is selling up to` line — when it reaches 8 Aug, you're hours away.
 
-Between 00:00 and 07:00 no shift is defined, so no report is filed. The watcher
-still runs and would still alert on an opening during those hours.
+A report is sent by the first run of the *next* shift, so **a missing report
+means the watcher stopped**. Nothing is reported between 00:00–07:00, though the
+watcher still runs and would still alert.
+
+Shifts are computed in IST via a fixed `+05:30` offset — India has no DST, so
+this is exact and needs no tzdata on a UTC host.
+
+**On demand** — type into the bot's chat:
+
+> report · status · check · update · news
+
+with or without a `/`, in any sentence (`any update?` works). There is no LLM
+here, just keyword matching. Replies arrive within one polling interval, since
+the bot reads messages when it wakes rather than running a server.
 
 ## Config
 
 | Var | Default | Meaning |
 |---|---|---|
-| `EVENT_CODE` | `ET00447840` | BMS movie code (parent — covers all formats) |
+| `EVENT_CODE` | `ET00502630` | BMS code **for the format**, not the parent movie |
 | `REGION_CODE` | `HYD` | City |
 | `DATES` | `20260808,20260809` | Dates to watch, `YYYYMMDD` |
 | `TIME_FROM` / `TIME_TO` | `06:00` / `20:00` | Show start window |
-| `FORMAT` | `4DX` | Substring match; blank = any format |
-| `LANGUAGE` | `English` | Substring match; blank = any language |
-| `VENUES` | *(empty)* | Comma-separated substrings; empty = all venues |
+| `FORMAT` | `4DX 3D` | Matched with punctuation stripped; blank = any |
+| `LANGUAGE` | `English` | Blank = any |
+| `VENUES` | *(empty)* | Comma-separated substrings; empty = all |
+| `MOVIE_SLUG` / `MOVIE_NAME` | Spider-Man | Booking link and alert title only |
 
-Finding another movie's code: `ET00…` appears in its BMS URL. The 4DX variant is
-its own child event (`ET00502630` here), but you query the **parent** code — the
-response carries every format, and the filter picks 4DX out.
+Every setting has a default in code; `.env` and secrets only override.
 
 ## Disclaimer
 
