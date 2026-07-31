@@ -27,3 +27,5 @@ logs/
 # Never commit local credential notes
 Project_Docs/
 *API*KEY*
+
+/test/
