@@ -1,0 +1,32 @@
+# systemd unit for the watcher. Copy to /etc/systemd/system/ and edit the
+# paths/user if you did not clone to /home/ubuntu/Movie_Notification_Bot.
+#
+#   sudo cp deploy/bms-watcher.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bms-watcher
+#   journalctl -u bms-watcher -f
+#
+# Restart=always is the whole point of running it here: this is what Windows
+# Task Scheduler refused to give us.
+
+[Unit]
+Description=BookMyShow showtime watcher -> Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Movie_Notification_Bot
+# -u because Python buffers stdout when it is not a terminal, and journalctl
+# would otherwise show nothing until the process exits.
+ExecStart=/usr/bin/python3 -u bms_watch.py --serve
+Restart=always
+RestartSec=10
+# Give up only if it fails 5 times in 5 minutes - that means a real fault, not
+# a flaky network, and the failure should be visible rather than looping.
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Install]
+WantedBy=multi-user.target
