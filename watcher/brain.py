@@ -56,7 +56,9 @@ def _apply_new_watch(spec):
                 "watch movie showtimes right now - District's event pages use a "
                 "different structure I haven't taught the watcher to read yet.")
 
-    hit = search.find(title, spec.get("city"))
+    city = (spec.get("city") or HOME_CITY).lower()
+    assumed_city = not spec.get("city")
+    hit = search.find(title, city)
     if not hit:
         return ("I couldn't find \"%s\" on District. Check the spelling, or it "
                 "may not be listed yet." % title)
@@ -79,9 +81,13 @@ def _apply_new_watch(spec):
         "time_to": spec.get("time_to") or "23:59",
     }
     watchspec.start(watch)
+    note = ""
+    if assumed_city:
+        note = ("\n\n(You didn't name a city, so I assumed %s - say \"watch it "
+                "in Mumbai\" to change that.)" % city.title())
     return ("🎯 Watching: %s\n\nI'll scan every %d minutes and ping you the "
-            "moment it appears. Say \"status\" any time."
-            % (pretty_spec(watch), SCAN_EVERY // 60))
+            "moment it appears. Say \"status\" any time.%s"
+            % (pretty_spec(watch), SCAN_EVERY // 60, note))
 
 
 def handle(message, hits, broken, bookable, tally=None):

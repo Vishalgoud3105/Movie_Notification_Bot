@@ -63,6 +63,12 @@ FORMAT = os.environ.get("FORMAT", "4DX 3D")
 LANGUAGE = os.environ.get("LANGUAGE", "English")
 
 
+# Used when a chat request does not name a city. Without it District serves a
+# generic page resolved by geolocation, which from a cloud VM is luck, not
+# intent - and watching the wrong city fails silently.
+HOME_CITY = os.environ.get("HOME_CITY", "hyderabad").strip().lower()
+
+
 # Which ticketing site to read. BookMyShow 403s every datacenter IP (verified on
 # GitHub Actions and Oracle Cloud), so "district" is the only source that works
 # from a server. "bms" still works from a residential connection.

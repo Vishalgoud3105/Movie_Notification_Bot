@@ -101,15 +101,18 @@ def shift_report(t):
                                       else "%d failed check(s) ⚠️" % t["errors"])]
     if t.get("bookable"):
         lines.append("📆 Tickets on sale up to: %s" % pretty_date(t["bookable"]))
-    lines += ["", "🎯 Watching %s %s%s, %s-%s:"
-              % (LANGUAGE, FORMAT,
-                 " at " + ", ".join(v.title() for v in VENUES) if VENUES else "",
-                 TIME_FROM, TIME_TO)]
+    # Any of these can be blank when a watch was set from chat without naming
+    # them, so build from the parts that exist rather than a fixed template.
+    what = " ".join(x for x in (LANGUAGE, FORMAT) if x) or "any show"
+    if VENUES:
+        what += " at " + ", ".join(v.title() for v in VENUES)
+    lines += ["", "🎯 Watching %s, %s-%s:" % (what, TIME_FROM, TIME_TO)]
     for date_code in DATES:
         n = (t.get("found") or {}).get(date_code, 0)
         lines.append("  %s %s - %s" % ("✅" if n else "🔒", pretty_date(date_code),
                                        "%d shows FOUND, alert sent!" % n if n
-                                       else "no %s shows scheduled yet" % FORMAT))
+                                       else "no %s shows scheduled yet"
+                                            % (FORMAT or "matching")))
     if all((t.get("found") or {}).get(d) for d in DATES):
         lines += ["", "🎉 Both dates are open. My job here is done!"]
     else:
