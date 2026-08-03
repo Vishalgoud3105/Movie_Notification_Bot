@@ -7,7 +7,8 @@ import time
 
 import requests
 
-from .bms import fetch, scan, shows_for
+from .bms import fetch, shows_for
+from .sources import scan
 from .config import *
 from .messages import alert_text, live_report, pretty_date, shift_report
 from .shifts import maybe_report_shift, shift_at
@@ -46,15 +47,22 @@ def run_cycle(state, session, jitter=False):
         tally["first"] = tally["first"] or stamp
         tally["last"] = stamp
 
+    delivered = True
     if fresh:
         by_date = {}
         for date_code, show in fresh:
             by_date.setdefault(date_code, []).append(show)
-        send_telegram(alert_text(by_date))
+        delivered = send_telegram(alert_text(by_date))
+        if not delivered:
+            print("ALERT NOT DELIVERED - not marking these shows as seen, "
+                  "so the next cycle tries again")
     else:
         print("nothing new")
 
-    state["seen"] = sorted(all_keys | seen)
+    # Only remember shows once the alert for them actually went out. Marking
+    # them seen on a failed send would drop the one message that matters and
+    # never retry it.
+    state["seen"] = sorted(all_keys | seen) if delivered else sorted(seen)
     state["shift"] = tally
     save_state(state)
     return hits, broken, bookable, tally
@@ -73,10 +81,10 @@ def main():
     save_state(state)
 
     if broken:
-        # Loud on purpose. "Couldn't reach BMS" looks exactly like "not open yet"
+        # Loud on purpose. "Couldn't reach the site" looks exactly like "not open yet"
         # from the outside, and silently watching nothing is the one failure that
         # loses the tickets. Non-zero exit -> GitHub marks the run failed and mails you.
-        sys.exit("could not reach BMS for %s - watcher is NOT working" % ", ".join(broken))
+        sys.exit("could not reach %s for %s - watcher is NOT working" % (SITE, ", ".join(broken)))
 
 
 def report_now():
@@ -94,28 +102,37 @@ def test_run():
     relaxes the format filter if it has to, guaranteeing a real message arrives.
     Never touches seen.json, so it cannot suppress the real alert later.
     """
+    from . import district
+    use_district = SOURCE == "district"
+    get = district.fetch if use_district else fetch
+    parse = district.shows_for if use_district else shows_for
+
     global FORMAT
     wanted = FORMAT
     session = requests.Session()
-    # IST, not the runner's clock: on a UTC machine date.today() is yesterday
-    # for most of the Indian evening, and BMS dates are Indian dates.
+    # IST, not the host clock: on a UTC machine date.today() is yesterday for
+    # most of the Indian evening, and showtime dates are Indian dates.
     today = dt.datetime.now(IST).strftime("%Y%m%d")
-    probe = fetch(session, today)
+    probe = get(session, today)
     if probe is None:
-        sys.exit("TEST FAILED: could not reach BMS - the watcher would not work")
+        sys.exit("TEST FAILED: could not reach %s - the watcher would not work" % SITE)
+
+    if use_district:
+        open_dates = [d.replace("-", "") for d in district.show_dates(probe)][:6] or [today]
+    else:
+        open_dates = [d["DateCode"] for d in probe.get("ShowDatesArray", [])
+                      if not d.get("isDisabled")][:6] or [today]
 
     # Scan open dates until real matching shows turn up - the first open date
     # often has none in this format, which would make for a useless test.
-    open_dates = [d["DateCode"] for d in probe.get("ShowDatesArray", [])
-                  if not d.get("isDisabled")][:6] or [today]
-    print("open dates on BMS: %s" % open_dates)
+    print("open dates on %s: %s" % (SITE, open_dates))
     payloads, dates, hits = {today: probe}, [], []
     for dc in open_dates:
         if dc not in payloads:
             time.sleep(random.uniform(4, 11))
-            payloads[dc] = fetch(session, dc)
+            payloads[dc] = get(session, dc)
         dates.append(dc)
-        found = [(dc, t) for _, t in shows_for(payloads.get(dc), dc)]
+        found = [(dc, t) for _, t in parse(payloads.get(dc), dc)]
         print("  %s: %d matching shows" % (dc, len(found)))
         hits += found
         if hits:
@@ -124,7 +141,11 @@ def test_run():
     relaxed = False
     if not hits:
         FORMAT, relaxed = "", True      # nothing in this format anywhere - show something real
-        hits = [(dc, t) for dc in dates for _, t in shows_for(payloads.get(dc), dc)]
+        if use_district:
+            district.FORMAT = ""
+        hits = [(dc, t) for dc in dates for _, t in parse(payloads.get(dc), dc)]
+        if use_district:
+            district.FORMAT = wanted
 
     FORMAT = wanted     # restore, so the preview below shows the real filter
     lines = ["✅ TEST PASSED - alerts will reach this chat! 📲",
@@ -134,9 +155,9 @@ def test_run():
              "  🕶️ Format: %s %s ONLY" % (LANGUAGE, wanted),
              "  📅 Dates:  %s" % " and ".join(pretty_date(d) for d in DATES),
              "  🕒 Shows:  starting between %s and %s" % (TIME_FROM, TIME_TO),
-             "  📍 City:   %s" % REGION_CODE,
+             "  📍 Venue:  %s" % (", ".join(v.title() for v in VENUES) or "any cinema"),
              "",
-             "🔒 Those dates are NOT open on BookMyShow yet.",
+             "🔒 No %s shows on those dates yet." % wanted,
              "👀 I'm checking every few minutes and will ping you ONCE,",
              "   the very moment they open. Sit back.",
              "",
@@ -153,7 +174,7 @@ def test_run():
             by_date.setdefault(dc, []).append(show)
         lines.append(alert_text(by_date))
     else:
-        lines.append("No shows found at all - check EVENT_CODE and REGION_CODE.")
+        lines.append("No shows found at all - check DISTRICT_URL and VENUES.")
     lines.append("- - - - - - - - - - - - - - - - - - - -")
     lines.append("☝️ end of preview - the real one lands on 8-9 Aug 🤞")
     send_telegram("\n".join(lines))
@@ -161,7 +182,7 @@ def test_run():
 
 
 def serve():
-    """Stay running: instant chat replies, BMS scan on the usual 10-min rhythm.
+    """Stay running: instant chat replies, site scan on the usual 10-min rhythm.
 
     Two different clocks on purpose. Chat messages are answered the second they
     arrive, via a long poll that Telegram holds open. BookMyShow is still only
@@ -169,8 +190,8 @@ def serve():
     them. A reply between scans uses the last scan's data, which is at most one
     interval old and is exactly what a scheduled run would have reported.
     """
-    print("serving: chat replies are instant, BMS scanned every %d min. Ctrl-C to stop."
-          % (SCAN_EVERY // 60))
+    print("serving: chat replies are instant, %s scanned every %d min. Ctrl-C to stop."
+          % (SITE, SCAN_EVERY // 60))
     state = load_state()
     session = requests.Session()
     hits, broken, bookable, tally = {}, [], None, None

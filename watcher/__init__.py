@@ -1,1 +1,1 @@
-"""BookMyShow showtime watcher."""
+"""Movie showtime watcher."""

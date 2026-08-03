@@ -1,6 +1,6 @@
 """Offline checks for the logic that would fail silently if it broke.
 
-No framework, no fixtures, no network: `python bms_watch.py --selftest`.
+No framework, no fixtures, no network: `python watch.py --selftest`.
 Filters are pinned here so a local .env can never change what is asserted.
 """
 
@@ -120,9 +120,58 @@ def demo():
     os.remove(state_mod.STATE_FILE)
     state_mod.STATE_FILE = keep
 
+    demo_district()
+
     bms.FORMAT, bms.LANGUAGE = "", ""       # blank filters = report everything
     assert len(shows_for(payload, "20260808")) == 5
     print("self-check ok")
+
+
+def demo_district():
+    """District parsing: UTC->IST, the format filter, venue filter, date guard."""
+    from watcher import district
+    district.FORMAT, district.VENUES = "4DX 3D", ["irrum manzil"]
+    district.TIME_FROM, district.TIME_TO = "06:00", "20:00"
+
+    def page(search_date, sessions):
+        return {"props": {"pageProps": {"data": {"serverState": {
+            "movieSessions": {"grp" + search_date: {
+                "searchDate": search_date,
+                "arrangedSessions": [
+                    {"entityName": "PVR Irrum Manzil, Khairatabad, Hyderabad",
+                     "sessions": sessions},
+                    {"entityName": "AMB Cinemas, Gachibowli",
+                     "sessions": [{"showTime": "2026-08-08T05:00", "scrnFmt": "4DX-3D",
+                                   "avail": 50, "audi": "A1"}]}]},
+            },
+            "mdpV2MovieData": {"194537": {"showDates": ["2026-08-08", "2026-08-09"]}},
+        }}}}}
+
+    got = district.shows_for(page("2026-08-08", [
+        # 04:40 UTC == 10:10 IST, inside the window
+        {"showTime": "2026-08-08T04:40", "scrnFmt": "4DX-3D", "avail": 2, "audi": "AUDI 01 4DX"},
+        # 17:15 UTC == 22:45 IST, outside the window
+        {"showTime": "2026-08-08T17:15", "scrnFmt": "4DX-3D", "avail": 9, "audi": "AUDI 01 4DX"},
+        # right format-ish but not 4DX 3D
+        {"showTime": "2026-08-08T05:00", "scrnFmt": "3D", "avail": 9, "audi": "AUDI 02"},
+        {"showTime": "2026-08-08T05:30", "scrnFmt": "2D", "avail": 9, "audi": "AUDI 03"},
+        # sold out but still worth reporting
+        {"showTime": "2026-08-08T11:15", "scrnFmt": "4DX-3D", "avail": 0, "audi": "AUDI 01 4DX"},
+    ]), "20260808")
+    times = sorted((s["time"], s["sold"]) for _, s in got)
+    assert times == [("10:10 AM", False), ("4:45 PM", True)], times
+    assert all("Irrum Manzil" in s["venue"] for _, s in got), got   # venue filter held
+    assert all(s["format"] == "4DX-3D" for _, s in got), got
+
+    # District echoing a different date must never be reported as ours
+    assert district.shows_for(page("2026-08-05", [
+        {"showTime": "2026-08-05T04:40", "scrnFmt": "4DX-3D", "avail": 5, "audi": "A"}]),
+        "20260808") == []
+
+    assert district.show_dates(page("2026-08-08", [])) == ["2026-08-08", "2026-08-09"]
+    assert district.to_iso("20260808") == "2026-08-08"
+    # a page with no __NEXT_DATA__ shape at all must be empty, not an exception
+    assert district.shows_for({}, "20260808") == []
 
 
 if __name__ == "__main__":

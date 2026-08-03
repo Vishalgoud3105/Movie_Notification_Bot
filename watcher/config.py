@@ -63,6 +63,16 @@ FORMAT = os.environ.get("FORMAT", "4DX 3D")
 LANGUAGE = os.environ.get("LANGUAGE", "English")
 
 
+# Which ticketing site to read. BookMyShow 403s every datacenter IP (verified on
+# GitHub Actions and Oracle Cloud), so "district" is the only source that works
+# from a server. "bms" still works from a residential connection.
+SOURCE = os.environ.get("SOURCE", "district").strip().lower()
+SITE = "District" if SOURCE == "district" else "BookMyShow"   # for user-facing text
+DISTRICT_URL = os.environ.get(
+    "DISTRICT_URL",
+    "https://www.district.in/movies/"
+    "spider-man-brand-new-day-movie-tickets-in-hyderabad-MV194537")
+
 MOVIE_SLUG = os.environ.get("MOVIE_SLUG", "spiderman-brand-new-day")
 
 
@@ -118,7 +128,7 @@ def shift_at(now):
     return next((s for s in SHIFTS if s[1] <= now.hour < s[2]), None)
 
 
-# Screen-brand noise BMS bakes into venue names ("PVR Superplex Inorbit: LUXE,
+# Screen-brand noise baked into venue names ("PVR Superplex Inorbit: LUXE,
 # PXL, 4DX: Cyberabad"). Dropped for readability; the format is in the header.
 SCREEN_WORDS = {"LUXE", "PXL", "4DX", "IMAX", "GOLD", "ONYX", "INSIGNIA", "PLAYHOUSE",
                 "DIRECTOR'S CUT", "SUPERPLEX", "P[XL]", "ICE", "MX4D", "EPIQ"}

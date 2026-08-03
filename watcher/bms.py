@@ -163,27 +163,3 @@ def shows_for(data, date_code):
                 "price": show.get("MinPrice") or "",
             }))
     return out
-
-
-def scan(session):
-    """One pass over every watched date.
-
-    Returns ({date: [(key, show)]}, unreachable dates, furthest date BMS is selling).
-    """
-    hits, broken, bookable = {}, [], None
-    for i, date_code in enumerate(DATES):
-        if i:
-            time.sleep(random.uniform(4, 11))  # a person does not fetch 7 dates in 200ms
-        data = fetch(session, date_code)
-        if data is None:
-            broken.append(date_code)
-            continue
-        # BMS greys out dates it has not scheduled yet; isDisabled mirrors that.
-        offered = [d["DateCode"] for d in data.get("ShowDatesArray", []) if not d.get("isDisabled")]
-        print("%s: bookable dates on BMS right now -> %s" % (date_code, offered[-3:] or "none"))
-        if offered:
-            bookable = max(offered) if not bookable else max(bookable, max(offered))
-        found = sorted(shows_for(data, date_code))
-        print("%s: %d shows in window" % (date_code, len(found)))
-        hits[date_code] = found
-    return hits, broken, bookable

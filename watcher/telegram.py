@@ -9,17 +9,43 @@ from .messages import live_report, pretty_date
 
 
 def send_telegram(text):
+    """Send a message, retrying hard. Never raises.
+
+    Sending used to have no retry at all, so a single connection reset - which
+    this network produces on roughly one attempt in six - lost the message and
+    threw the exception up into the caller. That cost a reply, and would just as
+    easily have cost the one alert this whole thing exists to deliver.
+
+    Returns True if every chunk was accepted.
+    """
     token = os.environ.get("TELEGRAM_API_TOKEN")
     chat = os.environ.get("TELEGRAM_CHAT_ID")
     if not (token and chat):
         print("no telegram creds set; message was:\n" + text)
-        return
+        return False
+
     url = "https://api.telegram.org/bot%s/sendMessage" % token
-    for i in range(0, len(text), 3800):  # telegram caps messages at 4096
-        r = requests.post(url, json={"chat_id": chat, "text": text[i:i + 3800],
-                                     "disable_web_page_preview": True}, timeout=20)
-        if r.status_code != 200:
-            print("telegram error %s: %s" % (r.status_code, r.text[:200]))
+    ok = True
+    for i in range(0, len(text), 3800):      # telegram caps messages at 4096
+        chunk = text[i:i + 3800]
+        for attempt in range(5):
+            try:
+                r = requests.post(url, json={"chat_id": chat, "text": chunk,
+                                             "disable_web_page_preview": True},
+                                  timeout=20)
+                if r.status_code == 200:
+                    break
+                print("telegram error %s: %s" % (r.status_code, r.text[:200]))
+                if 400 <= r.status_code < 500 and r.status_code != 429:
+                    ok = False       # malformed or unauthorised: retrying won't help
+                    break
+            except requests.RequestException as e:
+                print("telegram send failed (attempt %d): %s" % (attempt + 1, e))
+            time.sleep(2 * (attempt + 1))
+        else:
+            print("GAVE UP sending a message after 5 attempts")
+            ok = False
+    return ok
 
 
 def poll_commands(state, wait=0):
@@ -84,7 +110,7 @@ def answer(cmd, hits, broken, bookable, tally=None):
                                   checks=(tally or {}).get("checks", 1)))
     else:
         send_telegram("\n".join([
-            "🤖 I'm watching BookMyShow for you.",
+            "🤖 I'm watching %s for you." % SITE,
             "",
             "I'm not an AI - I just look for a keyword. Say any of:",
             "  report · status · check · update · news",

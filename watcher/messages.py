@@ -47,8 +47,12 @@ def format_days(by_date):
             if prices:
                 lines.append("     💰 from ₹%s"
                              % min(prices, key=lambda p: float(p or 0)).split(".")[0])
-        lines.append("  🔗 https://in.bookmyshow.com/movies/%s/buytickets/%s/%s"
-                     % (MOVIE_SLUG, EVENT_CODE, date_code))
+        if SOURCE == "district":
+            lines.append("  🔗 %s?fromdate=%s-%s-%s"
+                         % (DISTRICT_URL, date_code[:4], date_code[4:6], date_code[6:8]))
+        else:
+            lines.append("  🔗 https://in.bookmyshow.com/movies/%s/buytickets/%s/%s"
+                         % (MOVIE_SLUG, EVENT_CODE, date_code))
     return lines
 
 
@@ -75,15 +79,20 @@ def shift_report(t):
              "",
              "🔁 Checks run: %d%s" % (t["checks"],
                                       " (%s → %s)" % (t["first"], t["last"]) if t["checks"] else ""),
-             "📡 BookMyShow reachable: %s" % ("yes ✅" if not t["errors"]
-                                              else "%d failed check(s) ⚠️" % t["errors"])]
+             "📡 %s reachable: %s" % ("District" if SOURCE == "district" else "BookMyShow",
+                                      "yes ✅" if not t["errors"]
+                                      else "%d failed check(s) ⚠️" % t["errors"])]
     if t.get("bookable"):
-        lines.append("📆 BMS is selling up to: %s" % pretty_date(t["bookable"]))
-    lines += ["", "🎯 Watching %s %s, %s-%s:" % (LANGUAGE, FORMAT, TIME_FROM, TIME_TO)]
+        lines.append("📆 Tickets on sale up to: %s" % pretty_date(t["bookable"]))
+    lines += ["", "🎯 Watching %s %s%s, %s-%s:"
+              % (LANGUAGE, FORMAT,
+                 " at " + ", ".join(v.title() for v in VENUES) if VENUES else "",
+                 TIME_FROM, TIME_TO)]
     for date_code in DATES:
         n = (t.get("found") or {}).get(date_code, 0)
         lines.append("  %s %s - %s" % ("✅" if n else "🔒", pretty_date(date_code),
-                                       "%d shows FOUND, alert sent!" % n if n else "not open yet"))
+                                       "%d shows FOUND, alert sent!" % n if n
+                                       else "no %s shows scheduled yet" % FORMAT))
     if all((t.get("found") or {}).get(d) for d in DATES):
         lines += ["", "🎉 Both dates are open. My job here is done!"]
     else:

@@ -1,10 +1,10 @@
 # systemd unit for the watcher. Copy to /etc/systemd/system/ and edit the
 # paths/user if you did not clone to /home/ubuntu/Movie_Notification_Bot.
 #
-#   sudo cp deploy/bms-watcher.service /etc/systemd/system/
+#   sudo cp deploy/watcher.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
-#   sudo systemctl enable --now bms-watcher
-#   journalctl -u bms-watcher -f
+#   sudo systemctl enable --now watcher
+#   journalctl -u watcher -f
 #
 # Restart=always is the whole point of running it here: this is what Windows
 # Task Scheduler refused to give us.
@@ -20,7 +20,7 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/Movie_Notification_Bot
 # -u because Python buffers stdout when it is not a terminal, and journalctl
 # would otherwise show nothing until the process exits.
-ExecStart=/usr/bin/python3 -u bms_watch.py --serve
+ExecStart=/usr/bin/python3 -u watch.py --serve
 Restart=always
 RestartSec=10
 # Give up only if it fails 5 times in 5 minutes - that means a real fault, not
