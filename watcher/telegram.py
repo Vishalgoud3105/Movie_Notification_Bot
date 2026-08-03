@@ -103,8 +103,22 @@ def wants_report(text):
 
 
 def answer(cmd, hits, broken, bookable, tally=None):
-    """Reply to one chat message."""
+    """Reply to one chat message.
+
+    Tries the brain (LLM + watch handling) first, but any failure there must
+    still leave you with a working status command, so it falls through to the
+    keyword behaviour rather than raising.
+    """
     print("command from you: %s" % cmd)
+    try:
+        from .brain import handle
+        reply = handle(cmd, hits, broken, bookable, tally)
+        if reply:
+            send_telegram(reply)
+            return
+    except Exception as e:                      # never let chat break the watcher
+        print("brain failed, falling back to keywords: %s: %s" % (type(e).__name__, e))
+
     if wants_report(cmd):
         send_telegram(live_report(hits, broken, bookable,
                                   checks=(tally or {}).get("checks", 1)))

@@ -121,8 +121,11 @@ def demo():
     state_mod.STATE_FILE = keep
 
     demo_district()
+    demo_brain()
 
-    bms.FORMAT, bms.LANGUAGE = "", ""       # blank filters = report everything
+    # blank filters = report everything. VENUES too: demo_brain() restores the
+    # .env defaults on exit, which re-applies a venue filter to every module.
+    bms.FORMAT, bms.LANGUAGE, bms.VENUES = "", "", []
     assert len(shows_for(payload, "20260808")) == 5
     print("self-check ok")
 
@@ -176,3 +179,65 @@ def demo_district():
 
 if __name__ == "__main__":
     demo()
+
+
+def demo_brain():
+    """Routing and the watch lifecycle - all offline, no Groq, no network."""
+    import tempfile
+    from watcher import brain, llm, search, watchspec
+
+    # keyword commands must work with the LLM completely unavailable
+    real_available, llm.available = llm.available, lambda: False
+    reply = brain.handle("tell me a joke", {}, [], None)
+    assert "keywords" in reply.lower(), reply
+    assert "report" in reply.lower(), reply
+    # ...and a status request must never reach the LLM at all
+    assert brain.handle("status", {"20260808": []}, [], "20260813").startswith("📋"), \
+        "status must be answered from data, not the model"
+
+    # a title that does not exist is refused, never turned into a dead URL
+    real_find, search.find = search.find, lambda *a, **k: None
+    assert "couldn't find" in brain._apply_new_watch(
+        {"title": "a film that does not exist", "dates": ["2026-08-08"]}).lower()
+
+    # live events are declined honestly rather than half-supported
+    assert search.looks_like_event("Coldplay concert")
+    assert search.looks_like_event("India vs Australia cricket match")
+    assert not search.looks_like_event("Spider-Man: Brand New Day")
+    assert "live event" in brain._apply_new_watch(
+        {"title": "Coldplay concert", "dates": ["2026-08-08"]}).lower()
+
+    # found, but no dates given -> ask, do not guess
+    search.find = lambda *a, **k: {"title": "Some Film", "url": "https://x/y",
+                                   "city": "hyderabad", "movie_id": "1", "cities": []}
+    assert "which dates" in brain._apply_new_watch({"title": "Some Film"}).lower()
+
+    # full lifecycle: start a watch, then finish it and fall back to defaults
+    keep_watch, keep_state = watchspec.WATCH_FILE, None
+    watchspec.WATCH_FILE = os.path.join(tempfile.gettempdir(), "_watch_test.json")
+    from watcher import state as sm
+    keep_state, sm.STATE_FILE = sm.STATE_FILE, os.path.join(tempfile.gettempdir(),
+                                                            "_state_test.json")
+    try:
+        msg = brain._apply_new_watch({
+            "title": "Some Film", "dates": ["2026-08-08"], "format": "IMAX",
+            "venues": ["Forum"], "time_from": "10:00", "time_to": "22:00"})
+        assert "Watching" in msg, msg
+        active = watchspec.load()
+        assert active and active["active"] and active["format"] == "IMAX", active
+        # the live values must actually have moved, not just been stored
+        from watcher import district
+        assert district.FORMAT == "IMAX" and district.VENUES == ["forum"], district.FORMAT
+        assert district.DATES == ["20260808"], district.DATES
+
+        ended = watchspec.finish("found")
+        assert ended["active"] is False and ended["ended_reason"] == "found"
+        assert watchspec.load() is None, "a finished watch must not stay active"
+        assert district.FORMAT == watchspec._DEFAULTS["format"], "must restore defaults"
+    finally:
+        for f in (watchspec.WATCH_FILE, sm.STATE_FILE):
+            if os.path.exists(f):
+                os.remove(f)
+        watchspec.WATCH_FILE, sm.STATE_FILE = keep_watch, keep_state
+        search.find, llm.available = real_find, real_available
+        watchspec.apply(None)

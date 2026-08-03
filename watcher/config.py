@@ -73,6 +73,11 @@ DISTRICT_URL = os.environ.get(
     "https://www.district.in/movies/"
     "spider-man-brand-new-day-movie-tickets-in-hyderabad-MV194537")
 
+# Groq powers understanding messages and phrasing replies - never detection.
+# Without a key the bot still works; it just falls back to keyword commands.
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# GROQ_API_KEY is read from the environment at call time, never stored here.
+
 MOVIE_SLUG = os.environ.get("MOVIE_SLUG", "spiderman-brand-new-day")
 
 

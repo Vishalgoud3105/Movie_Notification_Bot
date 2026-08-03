@@ -63,6 +63,16 @@ def run_cycle(state, session, jitter=False):
     # them seen on a failed send would drop the one message that matters and
     # never retry it.
     state["seen"] = sorted(all_keys | seen) if delivered else sorted(seen)
+
+    # Goal reached: every watched date now has shows and the alert went out, so
+    # release the watch and be ready for the next request.
+    if delivered and fresh and all(hits.get(d) for d in DATES):
+        from . import watchspec
+        if watchspec.load():
+            watchspec.finish("found")
+            send_telegram("✅ That's everything I was watching for - alert sent "
+                          "above. I'm now free; tell me what to watch next.")
+            return hits, broken, bookable, tally
     state["shift"] = tally
     save_state(state)
     return hits, broken, bookable, tally

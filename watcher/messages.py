@@ -23,6 +23,23 @@ def short_venue(name):
     return out.strip(" ,")
 
 
+def pretty_spec(spec):
+    """Human summary of a watch spec, for confirmations and LLM facts."""
+    if not spec:
+        return "nothing"
+    bits = [spec.get("title") or "?"]
+    for key, prefix in (("format", ""), ("language", ""), ("city", "in ")):
+        if spec.get(key):
+            bits.append(prefix + str(spec[key]).title() if prefix else str(spec[key]))
+    if spec.get("venues"):
+        bits.append("at " + ", ".join(v.title() for v in spec["venues"]))
+    if spec.get("dates"):
+        bits.append("on " + ", ".join(spec["dates"]))
+    if spec.get("time_from"):
+        bits.append("%s-%s" % (spec["time_from"], spec.get("time_to", "")))
+    return " · ".join(b for b in bits if b)
+
+
 def pretty_date(date_code):
     """'20260808' -> 'Saturday, 8 Aug'."""
     d = dt.datetime.strptime(date_code, "%Y%m%d")
