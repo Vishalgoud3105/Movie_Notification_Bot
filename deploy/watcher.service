@@ -10,7 +10,7 @@
 # Task Scheduler refused to give us.
 
 [Unit]
-Description=BookMyShow showtime watcher -> Telegram
+Description=District showtime watcher -> Telegram
 After=network-online.target
 Wants=network-online.target
 
