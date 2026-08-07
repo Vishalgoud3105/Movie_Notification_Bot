@@ -16,6 +16,22 @@ from .state import load_state, save_state
 from .telegram import answer, poll_commands, send_telegram
 
 
+def boot():
+    """Re-apply a chat-set watch before anything reads the settings.
+
+    Without this a watch set by message survives in watch.json but not in the
+    process: after a systemd restart or reboot the watcher silently reverts to
+    the .env defaults and watches the wrong thing while looking healthy.
+    Imported lazily because watchspec imports this module.
+    """
+    from . import watchspec
+    spec = watchspec.apply()
+    if spec:
+        from .messages import pretty_spec
+        print("resuming watch: %s" % pretty_spec(spec))
+    return spec
+
+
 def run_cycle(state, session, jitter=False):
     """One full check: shift boundary, scan, alert, tally. Saves state.
 
@@ -64,22 +80,25 @@ def run_cycle(state, session, jitter=False):
     # never retry it.
     state["seen"] = sorted(all_keys | seen) if delivered else sorted(seen)
 
+    state["shift"] = tally
+    save_state(state)
+
     # Goal reached: every watched date now has shows and the alert went out, so
-    # release the watch and be ready for the next request.
+    # release the watch and be ready for the next request. Done after the save
+    # above, because finish() rewrites the state file itself - returning early
+    # here would have quietly discarded this cycle's tally.
     if delivered and fresh and all(hits.get(d) for d in DATES):
         from . import watchspec
         if watchspec.load():
             watchspec.finish("found")
             send_telegram("✅ That's everything I was watching for - alert sent "
                           "above. I'm now free; tell me what to watch next.")
-            return hits, broken, bookable, tally
-    state["shift"] = tally
-    save_state(state)
     return hits, broken, bookable, tally
 
 
 def main():
     """One-shot check, for cron or Task Scheduler."""
+    boot()
     state = load_state()
     session = requests.Session()
     hits, broken, bookable, tally = run_cycle(state, session, jitter=True)
@@ -99,6 +118,7 @@ def main():
 
 def report_now():
     """Send a status report for right now, on demand. Does not touch seen.json."""
+    boot()
     hits, broken, bookable = scan(requests.Session())
     send_telegram(live_report(hits, broken, bookable))
     print("report sent")
@@ -112,6 +132,7 @@ def test_run():
     relaxes the format filter if it has to, guaranteeing a real message arrives.
     Never touches seen.json, so it cannot suppress the real alert later.
     """
+    boot()
     from . import district
     use_district = SOURCE == "district"
     get = district.fetch if use_district else fetch
@@ -200,6 +221,7 @@ def serve():
     them. A reply between scans uses the last scan's data, which is at most one
     interval old and is exactly what a scheduled run would have reported.
     """
+    boot()
     print("serving: chat replies are instant, %s scanned every %d min. Ctrl-C to stop."
           % (SITE, SCAN_EVERY // 60))
     state = load_state()

@@ -29,3 +29,5 @@ logs/
 # Never commit local credential notes
 Project_Docs/
 *API*KEY*
+# Runtime watch set from chat, like seen.json
+watch.json

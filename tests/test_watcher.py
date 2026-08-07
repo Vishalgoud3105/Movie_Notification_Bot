@@ -230,6 +230,15 @@ def demo_brain():
         assert district.FORMAT == "IMAX" and district.VENUES == ["forum"], district.FORMAT
         assert district.DATES == ["20260808"], district.DATES
 
+        # simulate a restart: the process forgets everything, boot() must put
+        # the stored watch back or the watcher silently reverts to .env
+        district.FORMAT, district.VENUES, district.DATES = "WIPED", [], ["19990101"]
+        from watcher.runner import boot
+        resumed = boot()
+        assert resumed and resumed["format"] == "IMAX", resumed
+        assert district.FORMAT == "IMAX", "boot() must re-apply the stored watch"
+        assert district.DATES == ["20260808"], district.DATES
+
         ended = watchspec.finish("found")
         assert ended["active"] is False and ended["ended_reason"] == "found"
         assert watchspec.load() is None, "a finished watch must not stay active"

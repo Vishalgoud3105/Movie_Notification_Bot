@@ -20,7 +20,6 @@ from .config import *
 from .messages import live_report, pretty_date, pretty_spec
 from .telegram import send_telegram, wants_report
 
-CONFIRM_WORDS = ("yes", "yeah", "yep", "ok", "okay", "confirm", "go ahead", "do it", "sure")
 CANCEL_WORDS = ("cancel", "stop watching", "forget it", "abort", "reset")
 
 

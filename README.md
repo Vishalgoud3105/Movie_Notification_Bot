@@ -1,93 +1,74 @@
 # Movie Notification Bot 🕷️
 
-Watches BookMyShow and pings Telegram the moment tickets open for a specific
-movie, on specific dates, in a specific format — then goes quiet again.
+Watches a ticketing site and pings Telegram the moment shows appear for a
+specific movie, on specific dates, in a specific format — then goes quiet again.
 
-Current target: **Spider-Man: Brand New Day**, Hyderabad, **English 4DX 3D**,
-**8–9 Aug 2026**, shows starting **06:00–20:00**.
+Tell it what to watch in plain English, or set it in `.env`. It never books
+anything; it only watches.
 
-## Why the old version was blocked
+> Built to catch **Spider-Man: Brand New Day** in **English 4DX 3D** at
+> **PVR Irrum Manzil, Hyderabad**. It worked — the alert fired and the tickets
+> were booked.
 
-It scraped the BookMyShow website HTML. That page returns **403 to any
-non-browser client** — verified, even from a residential IP with a real Chrome
-user-agent. Header spoofing cannot fix it: the page expects a real browser to
-run a JS challenge and present a browser TLS fingerprint, and Python can fake
-neither. The parsed markup (`li.list-item`, `a.__name`) had also stopped
-existing when BMS became a single-page app.
+## Two things that make it trustworthy
 
-Two more faults meant the old workflow never even reached BMS:
-`requirements.txt` listed the stdlib modules `time` and `datetime`, so
-`pip install` failed, and the workflow invoked `demon_slayer_bot.py`, which
-did not exist.
+**1. Silence means "not open yet", never "I'm broken."** An unreachable site
+exits non-zero, and end-of-shift reports arrive whether or not anything was
+found — so a *missing* report is itself the alarm.
 
-## How this version works
+**2. The LLM is never asked whether shows exist.** It interprets your words and
+phrases replies. Detection is always parsed site data. A model that confidently
+says "not open yet" is indistinguishable from a correct one right up until the
+tickets are gone.
 
-It calls the **same JSON API the BookMyShow Android app uses**, which answers a
-well-formed app request normally. It is one request per date instead of a full
-page render. On top of that:
+## Why it reads District, not BookMyShow
 
-- a stable device id (`x-bms-id`) rather than a new identity every run
-- 0–45 s startup jitter, 4–11 s between dates
-- 3 retries with backoff, session reuse, and a second known endpoint as fallback
-- polling every 10 minutes, not every minute
+BookMyShow returns **403 to every datacenter IP**. Verified on GitHub Actions
+(Azure) and on Oracle Cloud in `ap-hyderabad-1` — both endpoints, every retry —
+while identical code gets 200 from a home connection. Being in-country didn't
+help; it's a hosting-ASN block.
 
-Personal, low-rate, read-only use. It watches; it never books, holds or buys.
+Two nights went into changing *where* the request came from. The fix was
+changing *who we asked*: **District (district.in)** sells the same PVR shows and
+serves datacenter IPs fine.
 
-## Two traps this bot avoids
+District is also the better source:
 
-**1. BMS does not 404 a date that isn't open yet — it silently returns *today's*
-showtimes instead.** A naive watcher sees a full venue list for "8 Aug", fires
-"BOOKINGS OPEN!", and is wrong. Every response is checked:
+| | BookMyShow | District |
+|---|---|---|
+| Format | hidden behind a separate child event code | explicit `scrnFmt: "4DX-3D"` |
+| Unopened dates | silently returns *today's* shows | echoes `searchDate` honestly |
+| Seats | sold-out flag | real counts (`avail`/`total`) |
+| From a server | ❌ 403 | ✅ 200 |
 
-```python
-if str(details[0].get("Date")) != date_code:   # served a different day = not open
-    return []
-```
-
-**2. The parent movie code does not expose every format.** Querying
-`ET00447840` returns only English 2D — the 4DX 3D shows are invisible from it.
-Each format is its own event, so the bot watches **`ET00502630`** (English
-4DX 3D) directly. Verified on 5 Aug: the parent reported 36 English 2D shows
-and zero 4DX, while the child reported 4DX 3D at three PVR screens.
-
-## Silence is trustworthy, failure is loud
-
-"Couldn't reach BMS" and "not open yet" look identical from outside, and the
-first one silently loses you the tickets. So an unreachable BMS **exits
-non-zero**. If the bot is quiet, it genuinely means "not open yet".
-
-## Where it runs
-
-**Locally, via Windows Task Scheduler — not GitHub Actions.**
-
-BMS returns 403 to GitHub's runners. Verified twice on two different runners:
-both endpoints, every retry, instant 403, while the identical request returns
-200 from a home connection. Actions runs on Azure datacenter IPs and BMS treats
-datacenter traffic differently. It is a network-level block, so no header or
-endpoint change avoids it.
-
-The workflow file is kept with its cron commented out and `workflow_dispatch`
-still enabled, purely so the block can be re-probed later.
+`SOURCE=bms` still works from a residential connection.
 
 ## Layout
 
 ```
-bms_watch.py            CLI entry only
+watch.py                CLI entry only
 watcher/
-  config.py             settings, headers, shift windows, keywords
-  bms.py                fetch, parse, filter, scan
+  config.py             settings, shift windows, keywords
+  district.py           the live source: fetch + parse district.in
+  bms.py                the BookMyShow reader (SOURCE=bms, home only)
+  sources.py            scan() — picks a source, one pass over the dates
   messages.py           alerts, shift reports, formatting
   shifts.py             shift boundary handling
   state.py              seen.json
   telegram.py           send, poll, reply
   runner.py             the run modes
+  llm.py                Groq client
+  prompt_template.py    extraction / chat / troubleshooting prompts
+  brain.py              routes a message: keywords → LLM → fallback
+  watchspec.py          the live watch; set by chat, reset when the goal fires
+  search.py             resolves a title against District's real catalogue
 tests/test_watcher.py   offline self-checks, no framework
+deploy/watcher.service  systemd unit
 ```
 
-Only dependency is `requests`. There is no web server and no framework — long
-polling means the bot makes outbound calls only, so there is nothing to host and
-no inbound surface. A webhook would be the alternative, and would need a public
-HTTPS host.
+Only dependency is **`requests`** — Groq speaks the OpenAI chat shape, so no SDK.
+No web server, no framework: long polling means outbound calls only, so there's
+nothing to host and no inbound surface.
 
 ## Setup
 
@@ -95,50 +76,72 @@ HTTPS host.
 pip install -r requirements.txt
 cp .env.example .env          # then fill in your own values
 
-python bms_watch.py --selftest   # offline logic check, no network
-python bms_watch.py --test       # test message + a preview of the real alert
-python bms_watch.py --report     # status report right now
-python bms_watch.py              # one check, for cron / Task Scheduler
-python -u bms_watch.py --serve   # stay running: instant chat replies
+python watch.py --selftest    # offline logic checks, no network
+python watch.py --report      # status report right now
+python watch.py --test        # test message + preview of the real alert
+python watch.py               # one check, for cron
+python -u watch.py --serve    # stay running: instant chat replies
 ```
 
-**`--serve` runs two clocks on purpose.** Telegram is long-polled, so a message
-you type is answered in about a second. BookMyShow is still only scanned every
-`SCAN_EVERY` seconds (600 by default) — replying fast must not mean hammering
-them — and a reply between scans reports the last scan's data. Shift boundaries
-are checked every loop, so a shift report lands on the boundary itself.
+Use `-u` when redirecting output — Python buffers stdout, so a long-running
+process otherwise logs nothing until it exits.
 
-Use `-u` when redirecting its output: Python buffers stdout, so a long-running
-process otherwise writes nothing to its log until it exits.
+### Deploy (Linux, systemd)
 
-Scheduled run every 10 minutes (Windows):
-
-```powershell
-Get-ScheduledTaskInfo   -TaskName "BMS Spiderman 4DX Watcher"   # last/next run
-Start-ScheduledTask     -TaskName "BMS Spiderman 4DX Watcher"   # force a check
-Disable-ScheduledTask   -TaskName "BMS Spiderman 4DX Watcher"   # pause
-Unregister-ScheduledTask -TaskName "BMS Spiderman 4DX Watcher"  # remove
+```bash
+sudo cp deploy/watcher.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now watcher
+journalctl -u watcher -f
 ```
+
+`Restart=always`, starts at boot. Runs comfortably on a 1 GB Always Free VM
+(~40 MB, near-zero CPU) — add swap, since 1 GB with none is fragile.
+
+**Never run two watchers on one bot token.** Telegram allows a single
+`getUpdates` consumer; two fight over messages and can double-alert.
+
+## Talking to it
+
+Needs `GROQ_API_KEY` (free at console.groq.com). Describe what you want:
+
+> *"watch Spider-Man 4DX 3D at Irrum Manzil on 8 and 9 Aug, morning to evening"*
+
+It resolves the title against District's real catalogue — not the model's
+output, since an invented title would become a URL that 404s forever while the
+watcher looked healthy — works out dates and the time window, confirms, and
+**resets itself once the alert has fired** so you can point it at the next show.
+`cancel` stops a watch.
+
+Live events (concerts, cricket) are declined rather than half-supported:
+District's `/events` pages use a different structure.
+
+### Keyword commands — always work, even with Groq down
+
+> report · status · check · update · news
+
+With or without a `/`, anywhere in a sentence. These are matched **before** the
+model is consulted, so the commands that tell you whether the watcher is alive
+never depend on it.
 
 ## Messages you'll get
 
-**The alert** — once, when tickets open:
+**The alert** — once, when shows appear:
 
 ```
 🚨🕷️ IT'S LIVE! ENGLISH 4DX 3D TICKETS ARE OPEN! 🕷️🚨
 
 🍿 Spider-Man: Brand New Day
-🎟️ 12 shows between 06:00 and 20:00
+🎟️ 4 shows between 06:00 and 20:00
 ⚡ GO BOOK NOW - 4DX sells out fast!
 
 📅 Saturday, 8 Aug
-  🎬 PVR Superplex Inorbit, Cyberabad
-     🕒 10:25 AM, 01:25 PM, 04:30 PM, 08:00 PM
-     💰 from ₹350
-  🔗 https://in.bookmyshow.com/movies/...
+  🎬 PVR Irrum Manzil
+     🕒 10:10 AM, 1:25 PM, 4:45 PM ❌, 7:45 PM
+  🔗 https://www.district.in/movies/...?fromdate=2026-08-08
 ```
 
-**Shift reports** — automatic, at the end of each IST shift:
+**Shift reports** — automatic, at each IST boundary:
 
 | Shift | Window |
 |---|---|
@@ -147,45 +150,35 @@ Unregister-ScheduledTask -TaskName "BMS Spiderman 4DX Watcher"  # remove
 | Evening | 18:00–21:00 |
 | Night | 21:00–24:00 |
 
-Each gives checks run, first/last check time, whether BMS was reachable, how far
-ahead BMS is currently selling, and per-date status. Watch the
-`📆 BMS is selling up to` line — when it reaches 8 Aug, you're hours away.
+Each gives checks run, first/last check time, whether the site was reachable,
+how far ahead tickets are on sale, and per-date status. Nothing is reported
+between 00:00–07:00, though the watcher still runs and would still alert.
 
-A report is sent by the first run of the *next* shift, so **a missing report
-means the watcher stopped**. Nothing is reported between 00:00–07:00, though the
-watcher still runs and would still alert.
-
-Shifts are computed in IST via a fixed `+05:30` offset — India has no DST, so
-this is exact and needs no tzdata on a UTC host.
-
-**On demand** — type into the bot's chat:
-
-> report · status · check · update · news
-
-with or without a `/`, in any sentence (`any update?` works). There is no LLM
-here, just keyword matching. Under `--serve` the reply is effectively instant;
-under a one-shot schedule it arrives on the next run.
+Shifts use a fixed `+05:30` offset — India has no DST, so it's exact and needs
+no tzdata on a UTC host. (District's `showTime` is UTC and is converted before
+the time window applies.)
 
 ## Config
 
-| Var | Default | Meaning |
-|---|---|---|
-| `EVENT_CODE` | `ET00502630` | BMS code **for the format**, not the parent movie |
-| `REGION_CODE` | `HYD` | City |
-| `DATES` | `20260808,20260809` | Dates to watch, `YYYYMMDD` |
-| `TIME_FROM` / `TIME_TO` | `06:00` / `20:00` | Show start window |
-| `FORMAT` | `4DX 3D` | Matched with punctuation stripped; blank = any |
-| `LANGUAGE` | `English` | Blank = any |
-| `VENUES` | *(empty)* | Comma-separated substrings; empty = all |
-| `MOVIE_SLUG` / `MOVIE_NAME` | Spider-Man | Booking link and alert title only |
-| `SCAN_EVERY` | `600` | `--serve` only: seconds between BMS scans |
-| `LONG_POLL` | `25` | `--serve` only: seconds each Telegram poll is held open |
+Every value has a default in code; `.env` only overrides.
 
-Every setting has a default in code; `.env` and secrets only override.
+| Var | Meaning |
+|---|---|
+| `TELEGRAM_API_TOKEN` / `TELEGRAM_CHAT_ID` | required |
+| `GROQ_API_KEY` / `GROQ_MODEL` | optional; enables plain-English chat |
+| `SOURCE` | `district` (default) or `bms` |
+| `DISTRICT_URL` | the city-specific movie page |
+| `HOME_CITY` | used when a chat request names no city |
+| `DATES` | `YYYYMMDD`, comma separated |
+| `TIME_FROM` / `TIME_TO` | show start window, IST |
+| `FORMAT` / `LANGUAGE` | punctuation-insensitive, so `4DX 3D` matches `4DX-3D` |
+| `VENUES` | substring match; blank = every cinema |
+| `SCAN_EVERY` / `LONG_POLL` | `--serve` only: 600 s and 25 s |
 
 ## Disclaimer
 
-Personal, non-commercial use. Not affiliated with BookMyShow.
+Personal, non-commercial use. Read-only — it never books, holds or buys.
+Not affiliated with District or BookMyShow.
 
 ---
 
