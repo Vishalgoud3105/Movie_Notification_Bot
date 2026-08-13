@@ -122,7 +122,18 @@ def shift_report(t):
 
 
 def live_report(hits, broken, bookable, checks=1):
-    """A shift report describing this very moment, from an already-done scan."""
+    """A shift report describing this very moment, from an already-done scan.
+
+    Short-circuits when nothing is being watched - without this, a "status"
+    request while idle would show the .env-configured field names (DATES,
+    FORMAT, VENUES still hold their original values, just unused for scanning
+    - see movies/runner.py::run_cycle()) as if they were a live default watch.
+    """
+    from . import watchspec
+    if not watchspec.load():
+        return ("😴 No movie is being watched right now. Tell me what to "
+                "watch, e.g. \"watch Spider-Man 4DX 3D at Irrum Manzil on 8 "
+                "and 9 Aug, morning to evening\".")
     now = dt.datetime.now(IST)
     shift = shift_at(now)
     name = shift[0] if shift else SHIFTS[-1][0]   # 00:00-07:00: report the shift just ended

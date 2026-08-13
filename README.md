@@ -1,7 +1,8 @@
-# Movie Notification Bot 🕷️
+# Notify AI 🕷️🚌
 
-Watches a ticketing site and pings Telegram the moment shows appear for a
-specific movie, on specific dates, in a specific format — then goes quiet again.
+Watches for something to become available and pings Telegram the moment it
+does — then goes quiet again. Started as a single-purpose movie-ticket
+watcher; now a small framework of independent domains sharing one bot.
 
 Tell it what to watch in plain English, or set it in `.env`. It never books
 anything; it only watches.
@@ -9,6 +10,23 @@ anything; it only watches.
 > Built to catch **Spider-Man: Brand New Day** in **English 4DX 3D** at
 > **PVR Irrum Manzil, Hyderabad**. It worked — the alert fired and the tickets
 > were booked.
+
+## Domains
+
+- **Movies** (`watcher/movies/`) — District/BookMyShow showtimes. Live in
+  production. Has a standing default watch (set via `.env`) as well as
+  chat-set ones.
+- **Bus fares** (`watcher/bus/`) — AbhiBus cheapest price for a route+date,
+  chat-set only (no standing default). Real, working, verified from the
+  Oracle VM. RedBus was tried and dropped: confirmed IP-blocked from the VM
+  even with a proper cookie warm-up — see `watcher/bus/sources.py`.
+
+Each domain is a self-contained sibling package with its own watch file, own
+state file, own message templates — not one shared `Source` interface, on
+purpose: see `watcher/router.py`'s docstring for why. `watcher/router.py`
+classifies an incoming chat message (movie vs bus) so both domains can share
+one Telegram poll; `watcher/config.py`, `watcher/telegram.py` and
+`watcher/llm.py` are the generic infrastructure every domain reuses.
 
 ## Two things that make it trustworthy
 
@@ -48,21 +66,40 @@ District is also the better source:
 ```
 watch.py                CLI entry only
 watcher/
-  config.py             settings, shift windows, keywords
-  district.py           the live source: fetch + parse district.in
-  bms.py                the BookMyShow reader (SOURCE=bms, home only)
-  sources.py            scan() — picks a source, one pass over the dates
-  messages.py           alerts, shift reports, formatting
-  shifts.py             shift boundary handling
-  state.py              seen.json
-  telegram.py           send, poll, reply
-  runner.py             the run modes
-  llm.py                Groq client
-  prompt_template.py    extraction / chat / troubleshooting prompts
-  brain.py              routes a message: keywords → LLM → fallback
-  watchspec.py          the live watch; set by chat, reset when the goal fires
-  search.py             resolves a title against District's real catalogue
-tests/test_watcher.py   offline self-checks, no framework
+  config.py             SHARED: Telegram/Groq creds, timing, IST clock, keywords
+  telegram.py           SHARED: send, poll — pure transport, no domain knowledge
+  llm.py                SHARED: Groq client, prompts passed in per domain
+  router.py             classifies a chat message movie-vs-bus, one shared poll
+  runner.py             top-level entry points; --serve runs both domains
+
+  movies/                the original watcher, unmoved in behavior
+    config.py            movie settings, layered on the shared config
+    district.py          the live source: fetch + parse district.in
+    bms.py                the BookMyShow reader (SOURCE=bms, home only)
+    sources.py            scan() — picks a source, one pass over the dates
+    messages.py           alerts, shift reports, formatting
+    shifts.py             shift boundary handling
+    state.py              seen.json
+    runner.py             the movie run modes (one-shot, --test, --report, --serve loop)
+    prompt_template.py    extraction / chat / troubleshooting prompts
+    brain.py              routes a message: keywords → LLM → fallback
+    watchspec.py          the live watch; set by chat, reset when the goal fires
+    search.py             resolves a title against District's real catalogue
+
+  bus/                    AbhiBus cheapest-fare watcher
+    config.py             bus settings, layered on the shared config
+    abhibus.py             the source - real, working, live-verified
+    sources.py            scan() — runs AbhiBus, wraps its result
+    messages.py           new-low/target-met alerts, shift and status reports
+    shifts.py             shift boundary handling
+    state.py              seen_bus.json (just the shift tally)
+    runner.py             run_cycle_bus(): compare-and-alert logic
+    prompt_template.py    extraction / chat / troubleshooting prompts
+    brain.py              routes a message: keywords → LLM → fallback
+    watchspec.py          the live route watch; set by chat, reset when cancelled
+
+tests/test_watcher.py   movie offline self-checks, no framework
+tests/test_bus.py       bus offline self-checks, no framework
 deploy/watcher.service  systemd unit
 ```
 

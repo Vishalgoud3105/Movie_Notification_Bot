@@ -124,8 +124,7 @@ def describe():
         lines.append("Active watch: %s" % messages.pretty_spec(spec))
         lines.append("Started: %s" % spec.get("started", "?"))
     else:
-        lines.append("No user-set watch is active; running on the configured "
-                     "default: %s" % MOVIE_NAME)
+        lines.append("No movie is being watched right now.")
     lines.append("Source site: %s" % SITE)
     lines.append("Scan interval: every %d minutes" % (SCAN_EVERY // 60))
     return "\n".join(lines)

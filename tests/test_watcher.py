@@ -14,11 +14,12 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from watcher import bms, state as state_mod, telegram
-from watcher.bms import shows_for, to_minutes
+from watcher import telegram
+from watcher.movies import bms, state as state_mod
+from watcher.movies.bms import shows_for, to_minutes
 from watcher.config import IST
-from watcher.messages import shift_report, short_venue
-from watcher.shifts import shift_at
+from watcher.movies.messages import shift_report, short_venue
+from watcher.movies.shifts import shift_at
 from watcher.telegram import poll_commands, wants_report
 
 
@@ -122,6 +123,7 @@ def demo():
 
     demo_district()
     demo_brain()
+    demo_group_chats()
 
     # blank filters = report everything. VENUES too: demo_brain() restores the
     # .env defaults on exit, which re-applies a venue filter to every module.
@@ -130,9 +132,99 @@ def demo():
     print("self-check ok")
 
 
+def demo_group_chats():
+    """Owner-only group auto-adoption: the security check, persistence, and
+    that a new group gets welcomed while an unauthorized add is ignored."""
+    import tempfile
+    from watcher import onboarding
+
+    keep_file = telegram.KNOWN_CHATS_FILE
+    telegram.KNOWN_CHATS_FILE = os.path.join(tempfile.gettempdir(), "_known_chats_test.json")
+    if os.path.exists(telegram.KNOWN_CHATS_FILE):
+        os.remove(telegram.KNOWN_CHATS_FILE)
+
+    keep_chat = os.environ.get("TELEGRAM_CHAT_ID")
+    keep_token = os.environ.get("TELEGRAM_API_TOKEN")
+    os.environ["TELEGRAM_CHAT_ID"] = "111"          # the owner's own chat
+    os.environ["TELEGRAM_API_TOKEN"] = "x"
+
+    real_welcome = onboarding.welcome_message
+    onboarding.welcome_message = lambda: "welcome text"   # no real Groq call
+
+    sent_to = []
+    pending = []
+    real_post = telegram.requests.post
+
+    def fake_post(url, json=None, **kw):
+        if "sendMessage" in url:
+            sent_to.append(json["chat_id"])
+            return type("R", (), {"status_code": 200, "text": "",
+                                  "json": staticmethod(lambda: {})})()
+        return type("R", (), {"status_code": 200,
+                    "json": staticmethod(lambda: {"result": pending})})()
+
+    telegram.requests.post = fake_post
+
+    def joined(chat_id, actor):
+        return {"my_chat_member": {"chat": {"id": chat_id, "type": "group"},
+                                   "from": {"id": actor},
+                                   "new_chat_member": {"status": "member"}}}
+
+    def left(chat_id, actor):
+        return {"my_chat_member": {"chat": {"id": chat_id, "type": "group"},
+                                   "from": {"id": actor},
+                                   "new_chat_member": {"status": "kicked"}}}
+
+    try:
+        st = {"tg_offset": 0}
+
+        # 1. the owner adds the bot to a new group -> adopted, welcomed there only
+        pending = [dict(update_id=1, **joined(-500, 111))]
+        poll_commands(st)
+        assert "-500" in telegram._load_known_chats(), telegram._load_known_chats()
+        assert sent_to == ["-500"], "must welcome only the new chat, not broadcast"
+
+        # 2. someone ELSE adding the bot elsewhere must be ignored entirely -
+        # this is the actual hijack-prevention check
+        pending = [dict(update_id=2, **joined(-600, 999))]
+        poll_commands(st)
+        assert "-600" not in telegram._load_known_chats(), \
+            "a non-owner group add must never be adopted"
+        assert sent_to == ["-500"], "must not welcome an unauthorized chat"
+
+        # 3. a message from the now-known group is accepted like any other chat
+        pending = [{"update_id": 3, "message": {"chat": {"id": -500}, "text": "status"}}]
+        assert poll_commands(st) == ["status"]
+
+        # 4. losing access drops a chat regardless of who removed it - Telegram
+        # itself reporting "kicked" is authoritative, no owner check needed here
+        pending = [dict(update_id=4, **left(-500, 999))]
+        poll_commands(st)
+        assert "-500" not in telegram._load_known_chats()
+
+        # 5. broadcast reaches every known chat, not just one
+        pending = [dict(update_id=5, **joined(-700, 111))]
+        poll_commands(st)
+        sent_to.clear()
+        assert telegram.send_telegram("hi")
+        assert set(sent_to) == {"111", "-700"}, sent_to
+    finally:
+        telegram.requests.post = real_post
+        onboarding.welcome_message = real_welcome
+        if os.path.exists(telegram.KNOWN_CHATS_FILE):
+            os.remove(telegram.KNOWN_CHATS_FILE)
+        telegram.KNOWN_CHATS_FILE = keep_file
+        if keep_chat is not None:
+            os.environ["TELEGRAM_CHAT_ID"] = keep_chat
+        else:
+            os.environ.pop("TELEGRAM_CHAT_ID", None)
+        if keep_token is not None:
+            os.environ["TELEGRAM_API_TOKEN"] = keep_token
+
+
 def demo_district():
     """District parsing: UTC->IST, the format filter, venue filter, date guard."""
-    from watcher import district
+    from watcher.movies import district
     district.FORMAT, district.VENUES = "4DX 3D", ["irrum manzil"]
     district.TIME_FROM, district.TIME_TO = "06:00", "20:00"
 
@@ -184,16 +276,21 @@ if __name__ == "__main__":
 def demo_brain():
     """Routing and the watch lifecycle - all offline, no Groq, no network."""
     import tempfile
-    from watcher import brain, llm, search, watchspec
+    from watcher import llm
+    from watcher.movies import brain, search, watchspec
 
     # keyword commands must work with the LLM completely unavailable
     real_available, llm.available = llm.available, lambda: False
     reply = brain.handle("tell me a joke", {}, [], None)
     assert "keywords" in reply.lower(), reply
     assert "report" in reply.lower(), reply
-    # ...and a status request must never reach the LLM at all
-    assert brain.handle("status", {"20260808": []}, [], "20260813").startswith("📋"), \
-        "status must be answered from data, not the model"
+    # ...and a status request must never reach the LLM at all - either a real
+    # shift report (📋, an active watch) or the idle message (😴, none right
+    # now) is a valid deterministic answer; what must never happen is falling
+    # through to the model, which llm.available()==False would catch anyway.
+    reply = brain.handle("status", {"20260808": []}, [], "20260813")
+    assert reply.startswith("📋") or reply.startswith("😴"), \
+        "status must be answered from data, not the model: %r" % reply
 
     # a title that does not exist is refused, never turned into a dead URL
     real_find, search.find = search.find, lambda *a, **k: None
@@ -215,7 +312,7 @@ def demo_brain():
     # full lifecycle: start a watch, then finish it and fall back to defaults
     keep_watch, keep_state = watchspec.WATCH_FILE, None
     watchspec.WATCH_FILE = os.path.join(tempfile.gettempdir(), "_watch_test.json")
-    from watcher import state as sm
+    from watcher.movies import state as sm
     keep_state, sm.STATE_FILE = sm.STATE_FILE, os.path.join(tempfile.gettempdir(),
                                                             "_state_test.json")
     try:
@@ -226,14 +323,14 @@ def demo_brain():
         active = watchspec.load()
         assert active and active["active"] and active["format"] == "IMAX", active
         # the live values must actually have moved, not just been stored
-        from watcher import district
+        from watcher.movies import district
         assert district.FORMAT == "IMAX" and district.VENUES == ["forum"], district.FORMAT
         assert district.DATES == ["20260808"], district.DATES
 
         # simulate a restart: the process forgets everything, boot() must put
         # the stored watch back or the watcher silently reverts to .env
         district.FORMAT, district.VENUES, district.DATES = "WIPED", [], ["19990101"]
-        from watcher.runner import boot
+        from watcher.movies.runner import boot
         resumed = boot()
         assert resumed and resumed["format"] == "IMAX", resumed
         assert district.FORMAT == "IMAX", "boot() must re-apply the stored watch"

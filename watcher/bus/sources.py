@@ -1,0 +1,26 @@
+"""Runs AbhiBus for one route+date.
+
+RedBus (watcher/bus/redbus.py) was dropped: confirmed IP-blocked from the
+Oracle VM even with the same cookie warm-up that makes AbhiBus work (see
+abhibus.py's docstring history / the universal-notifier-bot chat log, 14 Aug
+2026) - the same ceiling BookMyShow hit for the movie domain. One working
+source beats a second one that can't run in production.
+
+Kept as its own module (not folded into brain.py/runner.py) so a second
+source is a one-line addition here again if one is ever confirmed working -
+same shape movies/sources.py already proved out.
+"""
+
+from . import abhibus
+
+
+def scan(from_city, to_city, date_code):
+    """One pass over AbhiBus. Returns (hits: list[Hit], broken: list[str])."""
+    try:
+        found = abhibus.search(from_city, to_city, date_code)
+    except NotImplementedError as e:
+        print("abhibus not wired up yet: %s" % e)
+        return [], ["abhibus"]
+    if found is None:
+        return [], ["abhibus"]
+    return found, []

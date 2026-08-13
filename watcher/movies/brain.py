@@ -15,10 +15,11 @@ from parsed site data.
 
 import datetime as dt
 
-from . import llm, search, watchspec
+from . import search, watchspec
+from .. import llm
 from .config import *
 from .messages import live_report, pretty_date, pretty_spec
-from .telegram import send_telegram, wants_report
+from ..telegram import send_telegram, wants_report
 
 CANCEL_WORDS = ("cancel", "stop watching", "forget it", "abort", "reset")
 
@@ -26,6 +27,14 @@ CANCEL_WORDS = ("cancel", "stop watching", "forget it", "abort", "reset")
 def _facts(hits, broken, bookable, tally):
     """Everything the model is allowed to assert, straight from real data."""
     lines = [watchspec.describe()]
+    if not watchspec.load():
+        # DATES/etc still hold the .env field-name defaults (see
+        # run_cycle()'s docstring) but nothing was actually scanned for them -
+        # reporting a per-date breakdown here would tell the model there is a
+        # live watch on those dates when there is not.
+        if broken:
+            lines.append("WARNING: could not reach the site for %s" % ", ".join(broken))
+        return "\n".join(lines)
     if bookable:
         lines.append("Tickets on sale up to: %s" % pretty_date(bookable))
     for date_code in DATES:
