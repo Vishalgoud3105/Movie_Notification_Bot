@@ -18,7 +18,7 @@ import datetime as dt
 from . import search, watchspec
 from .. import llm
 from .config import *
-from .messages import live_report, pretty_date, pretty_spec
+from .messages import example_watch_phrase, live_report, pretty_date, pretty_spec
 from ..telegram import send_telegram, wants_report
 
 CANCEL_WORDS = ("cancel", "stop watching", "forget it", "abort", "reset")
@@ -146,8 +146,7 @@ def handle(message, hits, broken, bookable, tally=None):
         reply = llm.chat(text, facts)
 
     return reply or ("I didn't catch that. Say \"status\" for a report, or "
-                     "describe what to watch, e.g. \"watch Spider-Man 4DX 3D at "
-                     "Irrum Manzil on 8 and 9 Aug, morning to evening\".")
+                     "describe what to watch, e.g. \"%s\"." % example_watch_phrase())
 
 
 def reply(message, hits, broken, bookable, tally=None):
