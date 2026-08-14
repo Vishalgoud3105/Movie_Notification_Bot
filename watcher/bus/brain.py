@@ -5,6 +5,10 @@ deterministic keywords first (must survive Groq being down), then the LLM for
 setting up/changing/cancelling a watch, then a grounded chat fallback. The
 model decides what you MEANT; whether a fare exists is only ever answered from
 parsed site data.
+
+Several routes can be active at once (see watchspec.py). "cancel"/"modify"
+need to resolve WHICH one when more than one is - see _match_named() and the
+modify branch in handle() for the (documented, not perfect) rules.
 """
 
 import datetime as dt
@@ -12,12 +16,21 @@ import datetime as dt
 from . import watchspec
 from .. import llm
 from .config import *
-from .messages import pretty_date, status_text
+from .messages import pretty_date, pretty_spec, status_text
 from .prompt_template import CHAT_SYSTEM, EXTRACT_SYSTEM, EXTRACT_USER, TROUBLESHOOT_SYSTEM
 from ..telegram import send_telegram, wants_report
 
 CANCEL_WORDS = ("cancel", "stop watching", "forget it", "abort", "reset")
 OWNER_CONTEXT = "a traveller in Hyderabad watching bus fares"
+
+
+def _match_named(text):
+    """The id of an active route named in `text` ("cancel the bangalore one"),
+    or None if none is named - callers treat None as "act on every route"."""
+    for w in watchspec.load_all():
+        if (w.get("from_city") or "") in text or (w.get("to_city") or "") in text:
+            return w["id"]
+    return None
 
 
 def _refuse_unresolvable(from_city, to_city):
@@ -87,7 +100,16 @@ def _apply_new_watch(spec):
         "date": date_code,
         "target_price": target_price,
     }
+    # Watching the same route+date again reinforces the existing entry
+    # instead of starting a wasteful duplicate that double-scans it.
+    existing = next((w for w in watchspec.load_all()
+                     if w.get("from_city") == watch["from_city"]
+                     and w.get("to_city") == watch["to_city"]
+                     and w.get("date") == watch["date"]), None)
+    if existing:
+        watch["id"] = existing["id"]
     watchspec.start(watch)
+
     goal = ("I'll alert once a fare hits ₹%s or under, then stop." % watch["target_price"]
             if watch["target_price"] else
             "I'll alert every time I see a new lowest price.")
@@ -104,13 +126,14 @@ def handle(message, hits=None, broken=None, tally=None):
 
     # 1. deterministic first - must survive Groq being unavailable
     if wants_report(low):
-        return status_text(watchspec.load(), hits, broken)
+        return status_text(watchspec.load_all(), hits, broken)
 
     if any(w in low for w in CANCEL_WORDS):
-        ended = watchspec.finish("cancelled")
-        from .messages import pretty_spec
-        return ("Stopped watching %s.\n\nTell me what to watch next."
-                % (pretty_spec(ended) if ended else "the bus route"))
+        stopped = watchspec.finish(_match_named(low), "cancelled")
+        if not stopped:
+            return "Nothing to cancel - no bus route is being watched."
+        return ("Stopped watching: %s.\n\nTell me what to watch next."
+                % "; ".join(pretty_spec(w) for w in stopped))
 
     if not llm.available():
         return ("I only understand keywords right now (no GROQ_API_KEY set): "
@@ -123,19 +146,27 @@ def handle(message, hits=None, broken=None, tally=None):
 
     if spec and spec.get("intent") in ("watch", "modify"):
         if spec["intent"] == "modify":
-            current = watchspec.load()
-            if current:
+            # Only unambiguous when exactly one route is active - with several,
+            # guessing which one a bare "make it under 700" refers to risks
+            # silently mutating the wrong one, so it falls through and starts
+            # a new watch instead (which then gets deduped against an
+            # identical existing route by _apply_new_watch() anyway).
+            active = watchspec.load_all()
+            if len(active) == 1:
+                current = active[0]
                 merged = dict(current)
                 for k, v in spec.items():
                     if v and k in merged:
                         merged[k] = v
                 spec = merged
+                spec["id"] = current["id"]
         return _apply_new_watch(spec)
 
     if spec and spec.get("intent") == "cancel":
-        ended = watchspec.finish("cancelled")
-        from .messages import pretty_spec
-        return "Stopped watching %s." % (pretty_spec(ended) if ended else "the bus route")
+        stopped = watchspec.finish(_match_named(low), "cancelled")
+        if not stopped:
+            return "Nothing to cancel - no bus route is being watched."
+        return "Stopped watching: %s." % "; ".join(pretty_spec(w) for w in stopped)
 
     # 3. troubleshooting vs ordinary chat
     facts = watchspec.describe()

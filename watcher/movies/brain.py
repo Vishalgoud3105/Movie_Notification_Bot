@@ -11,6 +11,10 @@ Routing order matters and is deliberate:
 
 The model decides what you MEANT. Whether a show exists is only ever answered
 from parsed site data.
+
+Several movies can be active at once (see watchspec.py). "cancel"/"modify"
+need to resolve WHICH one when more than one is - see _match_named() and the
+modify branch in handle() for the (documented, not perfect) rules.
 """
 
 import datetime as dt
@@ -24,22 +28,35 @@ from ..telegram import send_telegram, wants_report
 CANCEL_WORDS = ("cancel", "stop watching", "forget it", "abort", "reset")
 
 
+def _match_named(text):
+    """The id of an active watch named in `text` ("cancel spiderman"), or
+    None if none is named - callers treat None as "act on every watch"."""
+    for w in watchspec.load_all():
+        if (w.get("title") or "").lower() in text:
+            return w["id"]
+    return None
+
+
 def _facts(hits, broken, bookable, tally):
-    """Everything the model is allowed to assert, straight from real data."""
+    """Everything the model is allowed to assert, straight from real data.
+
+    `hits` is {watch_id: {date_code: [(key, show)]}} - see
+    movies/runner.py::run_cycle().
+    """
     lines = [watchspec.describe()]
-    if not watchspec.load():
-        # DATES/etc still hold the .env field-name defaults (see
-        # run_cycle()'s docstring) but nothing was actually scanned for them -
-        # reporting a per-date breakdown here would tell the model there is a
-        # live watch on those dates when there is not.
+    watches = watchspec.load_all()
+    if not watches:
         if broken:
             lines.append("WARNING: could not reach the site for %s" % ", ".join(broken))
         return "\n".join(lines)
     if bookable:
         lines.append("Tickets on sale up to: %s" % pretty_date(bookable))
-    for date_code in DATES:
-        n = len(hits.get(date_code, []) or [])
-        lines.append("%s: %d matching shows found" % (pretty_date(date_code), n))
+    for w in watches:
+        wh = (hits or {}).get(w["id"], {})
+        for date_code in w.get("dates", []):
+            dc = date_code.replace("-", "")
+            n = len(wh.get(dc, []) or [])
+            lines.append("%s - %s: %d matching shows found" % (w.get("title"), pretty_date(dc), n))
     if broken:
         lines.append("WARNING: could not reach the site for %s" % ", ".join(broken))
     if tally:
@@ -88,6 +105,16 @@ def _apply_new_watch(spec):
         "time_from": spec.get("time_from") or "00:00",
         "time_to": spec.get("time_to") or "23:59",
     }
+    if spec.get("id"):
+        watch["id"] = spec["id"]
+    else:
+        # Watching the same movie+dates again reinforces the existing entry
+        # instead of starting a wasteful duplicate that double-scans it.
+        existing = next((w for w in watchspec.load_all()
+                         if w.get("movie_id") == hit["movie_id"]
+                         and set(w.get("dates", [])) == set(dates)), None)
+        if existing:
+            watch["id"] = existing["id"]
     watchspec.start(watch)
     note = ""
     if assumed_city:
@@ -110,9 +137,11 @@ def handle(message, hits, broken, bookable, tally=None):
                            checks=(tally or {}).get("checks", 1))
 
     if any(w in low for w in CANCEL_WORDS):
-        ended = watchspec.finish("cancelled")
-        return ("Stopped watching %s.\n\nTell me what to watch next."
-                % (pretty_spec(ended) if ended else "the default watch"))
+        stopped = watchspec.finish(_match_named(low), "cancelled")
+        if not stopped:
+            return "Nothing to cancel - no movie is being watched."
+        return ("Stopped watching: %s.\n\nTell me what to watch next."
+                % "; ".join(pretty_spec(w) for w in stopped))
 
     if not llm.available():
         return ("I only understand keywords right now (no GROQ_API_KEY set): "
@@ -124,19 +153,28 @@ def handle(message, hits, broken, bookable, tally=None):
 
     if spec and spec.get("intent") in ("watch", "modify"):
         if spec["intent"] == "modify":
-            current = watchspec.load()
-            if current:                     # fill the gaps from what is running
+            # Only unambiguous when exactly one movie is active - with
+            # several, guessing which one a bare "make it evening only"
+            # refers to risks silently mutating the wrong one, so it falls
+            # through and starts a new watch instead (deduped against an
+            # identical existing one by _apply_new_watch() anyway).
+            active = watchspec.load_all()
+            if len(active) == 1:
+                current = active[0]
                 merged = dict(current)
                 for k, v in spec.items():
                     if v and k in merged:
                         merged[k] = v
                 spec = merged
                 spec["intent"] = "watch"
+                spec["id"] = current["id"]
         return _apply_new_watch(spec)
 
     if spec and spec.get("intent") == "cancel":
-        ended = watchspec.finish("cancelled")
-        return "Stopped watching %s." % (pretty_spec(ended) if ended else "the default")
+        stopped = watchspec.finish(_match_named(low), "cancelled")
+        if not stopped:
+            return "Nothing to cancel - no movie is being watched."
+        return "Stopped watching: %s." % "; ".join(pretty_spec(w) for w in stopped)
 
     # 3. troubleshooting vs ordinary chat
     if any(w in low for w in ("not working", "broken", "why", "error", "fix",

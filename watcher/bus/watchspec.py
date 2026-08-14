@@ -1,90 +1,146 @@
-"""The bus route currently being watched, settable from chat and reset when done.
+"""The bus routes currently being watched (plural), settable from chat, each
+finished independently when its own goal fires or it's cancelled.
 
-Mirrors watcher/movies/watchspec.py's shape (load/save/start/finish/describe,
-same atomic-write pattern) but simpler: there is no .env-configured default
-route to fall back on the way movies falls back to Spider-Man, so "no watch" is
-just None, not a _push()/_TARGETS global-reassignment onto a default spec.
-Nothing scans for buses unless a spec is active.
+WATCH_FILE holds {"watches": [spec, spec, ...]} - multiple routes can be
+active at once, each with its own id, scanned and alerted on independently
+by bus/runner.py::run_cycle_bus(). A finished watch is dropped from the list
+entirely rather than kept inactive-but-present (unlike the movie domain's
+history-keeping) - with several routes churning through independently,
+accumulating dead entries forever has no payoff and only bloats the file.
 """
 
 import datetime as dt
 import json
 import os
+import uuid
 
 from .config import *
 
 WATCH_FILE = os.environ.get("BUS_WATCH_FILE", "watch_bus.json")
 
 
-def load():
-    """The active spec, or None if nothing is being watched."""
+def _load_raw():
     if not os.path.exists(WATCH_FILE):
-        return None
+        return []
     try:
         with open(WATCH_FILE) as f:
-            spec = json.load(f)
-        return spec if isinstance(spec, dict) and spec.get("active") else None
+            data = json.load(f)
     except (ValueError, OSError):
-        return None
+        return []
+    watches = data.get("watches") if isinstance(data, dict) else None
+    return watches if isinstance(watches, list) else []
 
 
-def save(spec):
+def _save(watches):
     tmp = WATCH_FILE + ".tmp"
     with open(tmp, "w") as f:
-        json.dump(spec, f, indent=1)
+        json.dump({"watches": watches}, f, indent=1)
     os.replace(tmp, WATCH_FILE)      # atomic, same reason as seen.json
 
 
+def load_all():
+    """Every route being watched right now."""
+    return [w for w in _load_raw() if isinstance(w, dict) and w.get("active")]
+
+
+def load():
+    """A single active watch, or None - only for callers that just need "is
+    anything active at all" (e.g. the idle check in brain.py). Never use this
+    to decide WHICH route to act on when more than one might be active."""
+    watches = load_all()
+    return watches[0] if watches else None
+
+
+def find(from_city=None, to_city=None):
+    """Best-effort match of a spoken route against active watches - substring,
+    case-insensitive. Used to figure out which watch a message like "cancel
+    the bangalore one" refers to when several are active."""
+    from_city = (from_city or "").strip().lower()
+    to_city = (to_city or "").strip().lower()
+    if not (from_city or to_city):
+        return None
+    for w in load_all():
+        if ((not from_city or from_city in (w.get("from_city") or ""))
+                and (not to_city or to_city in (w.get("to_city") or ""))):
+            return w
+    return None
+
+
 def start(spec):
-    """Begin watching a route.
+    """Begin watching a route, or update one already being watched (its `id`
+    is in `spec`) rather than creating a duplicate.
 
     `lowest_seen` carries over only when this is the same route+date already
     being watched - i.e. a "modify" that tweaks target_price. Without this
-    check, brain.py's modify path (which calls start() again to apply merged
-    fields) would silently wipe the lowest price already found and alerted
-    on, and the next cycle would re-alert on a price the user already knows
-    about. A genuinely different route always starts fresh.
+    check, re-affirming an existing watch would silently wipe the lowest
+    price already found and alerted on, and the next cycle would re-alert on
+    a price the user already knows about. A genuinely different route always
+    starts fresh with its own new id.
     """
     spec = dict(spec)
     spec.setdefault("target_price", None)
-    current = load()
+
+    watches = _load_raw()
+    current = next((w for w in watches if w.get("id") == spec.get("id")), None) \
+        if spec.get("id") else None
     same_route = bool(current) and all(
         current.get(k) == spec.get(k) for k in ("from_city", "to_city", "date"))
+
+    spec["id"] = spec.get("id") or uuid.uuid4().hex[:8]
     spec["lowest_seen"] = current.get("lowest_seen") if same_route else None
     spec["active"] = True
-    spec["started"] = (current["started"] if same_route
+    spec["started"] = (current["started"] if same_route and current
                        else dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M"))
-    save(spec)
+
+    watches = [w for w in watches if w.get("id") != spec["id"]]
+    watches.append(spec)
+    _save(watches)
     return spec
 
 
-def finish(reason="cancelled"):
-    """Stop watching. Deactivated rather than deleted, so it stays inspectable."""
-    spec = load()
-    if spec:
-        spec["active"] = False
-        spec["ended"] = dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M")
-        spec["ended_reason"] = reason
-        save(spec)
-    return spec
+def finish(watch_id=None, reason="cancelled"):
+    """Stop watching one route (by id) or every active route (id=None).
+
+    Always returns a LIST of the specs that were stopped (possibly empty),
+    even for a single id - callers format "stopped watching: X" from a list
+    either way rather than branching on shape.
+    """
+    watches = _load_raw()
+    stopped = []
+    for w in watches:
+        if w.get("active") and (watch_id is None or w.get("id") == watch_id):
+            w = dict(w)
+            w["active"] = False
+            w["ended"] = dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M")
+            w["ended_reason"] = reason
+            stopped.append(w)
+    stopped_ids = {w["id"] for w in stopped}
+    remaining = [w for w in watches if w.get("id") not in stopped_ids]
+    _save(remaining)
+    return stopped
 
 
-def note_price(price):
-    """A new cheapest price seen this watch. Persists it, returns the updated spec."""
-    spec = load()
-    if spec:
-        spec["lowest_seen"] = price
-        save(spec)
-    return spec
+def note_price(watch_id, price):
+    """A new cheapest price seen for one watch. Persists it, returns the spec."""
+    watches = _load_raw()
+    updated = None
+    for w in watches:
+        if w.get("id") == watch_id:
+            w["lowest_seen"] = price
+            updated = w
+    _save(watches)
+    return updated
 
 
 def describe():
     """Facts block for the LLM prompts - only things actually known."""
     from .messages import pretty_spec
-    spec = load()
-    if not spec:
+    watches = load_all()
+    if not watches:
         return "No bus watch is active right now."
-    lines = ["Active watch: %s" % pretty_spec(spec), "Started: %s" % spec.get("started", "?")]
-    if spec.get("lowest_seen"):
-        lines.append("Lowest price seen so far: ₹%s" % spec["lowest_seen"])
+    lines = []
+    for w in watches:
+        lines.append("Active watch: %s (started %s)" % (pretty_spec(w), w.get("started", "?")))
+        if w.get("lowest_seen"):
+            lines.append("  Lowest price seen so far: ₹%s" % w["lowest_seen"])
     return "\n".join(lines)

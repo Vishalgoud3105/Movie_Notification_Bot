@@ -31,7 +31,10 @@ def maybe_report_shift(state, watching):
         print("sent %s shift report" % tally["name"])
         tally = None
     if shift and watching and not tally:
+        # "watches" is keyed by watch id -> {"title", "found": {date_code: count}},
+        # built fresh each cycle in run_cycle() - the shift report lists every
+        # movie active during the shift, not just one.
         tally = {"name": shift[0], "date": now.strftime("%Y%m%d"), "checks": 0,
-                 "first": None, "last": None, "errors": 0, "found": {}, "bookable": None}
+                 "first": None, "last": None, "errors": 0, "watches": {}, "bookable": None}
     state["shift"] = tally
     return tally

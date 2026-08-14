@@ -87,17 +87,22 @@ def shift_report(t):
     return "\n".join(lines)
 
 
-def status_text(spec, hits, broken):
-    """On-demand report: what's being watched and the cheapest fare right now."""
-    if not spec:
+def status_text(specs, hits, broken):
+    """On-demand report: every route being watched, and the cheapest fare
+    seen right now across all of them combined (hits is pooled from every
+    active route's scan this cycle - see run_cycle_bus())."""
+    if not specs:
         return "🚌 No bus route is being watched right now. Say something like " \
                "\"watch bus from Hyderabad to Bangalore on 20 Aug\"."
-    lines = ["🚌 Watching: %s" % pretty_spec(spec)]
-    if spec.get("lowest_seen"):
-        lines.append("💰 Lowest seen so far: ₹%s" % spec["lowest_seen"])
+    lines = []
+    for spec in specs:
+        lines.append("🚌 Watching: %s" % pretty_spec(spec))
+        if spec.get("lowest_seen"):
+            lines.append("   💰 Lowest seen so far: ₹%s" % spec["lowest_seen"])
     if hits:
         cheapest = min(hits, key=lambda h: h["price"])
-        lines.append("📊 Cheapest right now: ₹%s on %s (%s)"
+        lines.append("")
+        lines.append("📊 Cheapest right now overall: ₹%s on %s (%s)"
                      % (cheapest["price"], cheapest["operator"], cheapest["source"]))
         if cheapest.get("book_url"):
             lines.append("🔗 %s" % cheapest["book_url"])

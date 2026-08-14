@@ -25,6 +25,7 @@ def demo():
 
     try:
         _demo_watchspec_lifecycle()
+        _demo_multi_watch()
         _demo_run_cycle(sent)
         _demo_shift_report()
         _demo_router()
@@ -42,32 +43,59 @@ def _demo_watchspec_lifecycle():
     spec = watchspec.start({"from_city": "hyderabad", "to_city": "bangalore",
                             "date": "20260820", "target_price": None})
     assert spec["active"] and spec["lowest_seen"] is None, spec
+    wid = spec["id"]
 
     active = watchspec.load()
     assert active and active["from_city"] == "hyderabad", active
 
-    updated = watchspec.note_price(750)
+    updated = watchspec.note_price(wid, 750)
     assert updated["lowest_seen"] == 750, updated
     assert watchspec.load()["lowest_seen"] == 750
 
-    ended = watchspec.finish("cancelled")
-    assert ended["active"] is False and ended["ended_reason"] == "cancelled", ended
+    ended = watchspec.finish(wid, "cancelled")
+    assert len(ended) == 1 and ended[0]["active"] is False and ended[0]["ended_reason"] == "cancelled", ended
     assert watchspec.load() is None, "a finished watch must not stay active"
 
-    # a "modify" (start() called again for the SAME route+date) must not lose
-    # the progress already made - only a genuinely different route resets it
-    watchspec.start({"from_city": "hyderabad", "to_city": "bangalore",
-                     "date": "20260820", "target_price": None})
-    watchspec.note_price(700)
-    modified = watchspec.start({"from_city": "hyderabad", "to_city": "bangalore",
-                                "date": "20260820", "target_price": 650})
+    # a "modify" (start() called again with the SAME id) must not lose the
+    # progress already made - only a genuinely different route resets it
+    s1 = watchspec.start({"from_city": "hyderabad", "to_city": "bangalore",
+                          "date": "20260820", "target_price": None})
+    watchspec.note_price(s1["id"], 700)
+    modified = watchspec.start({"id": s1["id"], "from_city": "hyderabad",
+                                "to_city": "bangalore", "date": "20260820",
+                                "target_price": 650})
     assert modified["lowest_seen"] == 700, \
         "modifying target_price must not wipe the lowest price already found"
+    assert modified["id"] == s1["id"], "a modify must reuse the same id"
 
     fresh = watchspec.start({"from_city": "chennai", "to_city": "pune",
                              "date": "20260901", "target_price": None})
     assert fresh["lowest_seen"] is None, "a genuinely new route must start fresh"
-    watchspec.finish("cancelled")
+    assert fresh["id"] != modified["id"], "a different route must get its own id"
+
+    watchspec.finish(None, "cancelled")   # clean up everything for the next test
+    assert watchspec.load_all() == []
+
+
+def _demo_multi_watch():
+    """Several routes can be active - and watched, and cancelled - at once."""
+    r1 = watchspec.start({"from_city": "hyderabad", "to_city": "bangalore",
+                          "date": "20260820", "target_price": None})
+    r2 = watchspec.start({"from_city": "chennai", "to_city": "pune",
+                          "date": "20260825", "target_price": None})
+    assert len(watchspec.load_all()) == 2, watchspec.load_all()
+
+    # find() matches a named route among several active ones
+    match = watchspec.find(to_city="bangalore")
+    assert match and match["id"] == r1["id"], match
+
+    # finishing one by id must not touch the other
+    watchspec.finish(r1["id"], "cancelled")
+    remaining = watchspec.load_all()
+    assert len(remaining) == 1 and remaining[0]["id"] == r2["id"], remaining
+
+    watchspec.finish(None, "cancelled")
+    assert watchspec.load_all() == []
 
 
 def _demo_run_cycle(sent):
@@ -75,8 +103,9 @@ def _demo_run_cycle(sent):
     from watcher.bus import sources
 
     state = {"shift": None}
-    watchspec.start({"from_city": "hyderabad", "to_city": "bangalore",
-                     "date": "20260820", "target_price": None})
+    spec = watchspec.start({"from_city": "hyderabad", "to_city": "bangalore",
+                            "date": "20260820", "target_price": None})
+    wid = spec["id"]
 
     fake_hits = [
         {"operator": "Orange Travels", "price": 900, "seat_type": "sleeper",
@@ -103,8 +132,9 @@ def _demo_run_cycle(sent):
         assert len(sent) == 2 and "700" in sent[1], sent
         assert watchspec.load()["lowest_seen"] == 700
 
-        # a target price is met -> one alert, then the watch ends
-        watchspec.start({"from_city": "hyderabad", "to_city": "bangalore",
+        # a target price is added (same id - a modify, not a new watch) -> met
+        # immediately -> one alert, then the watch ends
+        watchspec.start({"id": wid, "from_city": "hyderabad", "to_city": "bangalore",
                          "date": "20260820", "target_price": 650})
         sources.scan = lambda *a, **k: ([{"operator": "SRS", "price": 600,
                                           "seat_type": "seater", "source": "abhibus"}], [])
@@ -176,10 +206,21 @@ def _demo_router():
     from watcher import router
     from watcher.movies import watchspec as movie_watchspec
 
-    assert router.classify("watch bus from Hyderabad to Bangalore on 20 Aug") == "bus"
-    assert router.classify("any abhibus fares yet?") == "bus"
-    assert router.classify("watch Spider-Man 4DX 3D at Irrum Manzil") == "movie"
-    assert router.classify("what's showing at the cinema tonight") == "movie"
+    assert router.classify("watch bus from Hyderabad to Bangalore on 20 Aug") == ["bus"]
+    assert router.classify("any abhibus fares yet?") == ["bus"]
+    assert router.classify("watch Spider-Man 4DX 3D at Irrum Manzil") == ["movie"]
+    assert router.classify("what's showing at the cinema tonight") == ["movie"]
+
+    # a message naming BOTH domains must dispatch to both - not let one
+    # keyword match eat the entire message and silently drop the other half
+    both = router.classify("watch spiderman 4dx 3d and also watch bus from hyd to blr")
+    assert set(both) == {"movie", "bus"}, both
+
+    # deterministic domain-qualified commands: "check bus"/"cancel movie" must
+    # route to exactly that domain, no LLM guessing needed
+    assert router.classify("check bus") == ["bus"]
+    assert router.classify("cancel movie") == ["movie"]
+    assert router.classify("bus status") == ["bus"]
 
     # ambiguous wording routes to whichever domain actually has a live watch
     keep_bus, watchspec.WATCH_FILE = watchspec.WATCH_FILE, os.path.join(
@@ -189,14 +230,14 @@ def _demo_router():
     try:
         watchspec.start({"from_city": "a", "to_city": "b", "date": "20260820",
                          "target_price": None})
-        assert router.classify("status") == "bus"
-        assert router.classify("cancel") == "bus"
-        watchspec.finish("cancelled")
+        assert router.classify("status") == ["bus"]
+        assert router.classify("cancel") == ["bus"]
+        watchspec.finish(None, "cancelled")
 
         # neither active, Groq unreachable in this offline test -> falls back to movie
         from watcher import llm
         real_available, llm.available = llm.available, lambda: False
-        assert router.classify("status") == "movie"
+        assert router.classify("status") == ["movie"]
         llm.available = real_available
     finally:
         for f in (watchspec.WATCH_FILE, movie_watchspec.WATCH_FILE):
@@ -235,14 +276,14 @@ def _demo_refuse_unresolvable():
         assert "Watching" in msg, msg
         assert watchspec.load() is not None, \
             "a transient validation failure must not block starting the watch"
-        watchspec.finish("cancelled")
+        watchspec.finish(None, "cancelled")
 
         # a real match proceeds normally
         abhibus.resolve = lambda name: (7, None)
         msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "bangalore",
                                       "date": "2026-08-20"})
         assert "Watching" in msg, msg
-        watchspec.finish("cancelled")
+        watchspec.finish(None, "cancelled")
 
         # same city twice, a date already in the past, and a target_price the
         # LLM hallucinated as text must all be refused before ever touching

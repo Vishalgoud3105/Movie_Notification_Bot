@@ -1,6 +1,13 @@
-"""Classifies an incoming chat message so movie and bus can share one Telegram
-poll (never run two getUpdates consumers on one bot token - see the deploy
-notes). This is the only file that knows both domains exist.
+"""Classifies an incoming chat message across every registered domain, so
+they can all share one Telegram poll (never run two getUpdates consumers on
+one bot token - see the deploy notes). This is the only file that knows
+every domain exists.
+
+One entry in DOMAINS per domain - adding a future one (concert tickets,
+cricket tickets, ...) means adding one entry here, nothing else in this file
+changes. Each entry names the words that identify it in a message (so "check
+bus", "cancel movie", "bus status" all route deterministically, no LLM
+needed) plus its runner/watchspec modules.
 """
 
 import re
@@ -11,40 +18,57 @@ from .bus import watchspec as bus_watchspec
 from .movies import runner as movies_runner
 from .movies import watchspec as movies_watchspec
 
-BUS_WORDS = ("bus", "abhibus", "coach")
-MOVIE_WORDS = ("movie", "cinema", "film", "show", "ticket", "4dx", "imax", "screen")
+DOMAINS = {
+    "movie": {
+        "words": ("movie", "movies", "cinema", "film", "show", "ticket", "4dx", "imax", "screen"),
+        "runner": movies_runner,
+        "watchspec": movies_watchspec,
+    },
+    "bus": {
+        "words": ("bus", "buses", "abhibus", "coach"),
+        "runner": bus_runner,
+        "watchspec": bus_watchspec,
+    },
+}
+
 ROUTE_PATTERN = re.compile(r"\bfrom\s+\w+.{0,20}\bto\s+\w+", re.I)
 
 
+def _mentions(name, low):
+    if any(w in low for w in DOMAINS[name]["words"]):
+        return True
+    return name == "bus" and bool(ROUTE_PATTERN.search(low))
+
+
 def classify(text):
-    """"movie" | "bus" - never raises, always returns something usable."""
-    low = text.lower()
-
-    if any(w in low for w in BUS_WORDS) or ROUTE_PATTERN.search(low):
-        return "bus"
-    if any(w in low for w in MOVIE_WORDS):
-        return "movie"
-
-    # Ambiguous wording (e.g. "status", "cancel") - let whichever domain is
-    # actually running decide, rather than a keyword list guessing.
-    movie_active = bool(movies_watchspec.load())
-    bus_active = bool(bus_watchspec.load())
-    if movie_active and not bus_active:
-        return "movie"
-    if bus_active and not movie_active:
-        return "bus"
-
-    # Still unclear (both or neither active) - one cheap classification call.
-    guess = llm.classify_domain(text) if llm.available() else None
-    return guess or "movie"      # movie is the only domain with a standing default
-
-
-def answer(cmd, movie_ctx, bus_ctx):
-    """Route one chat command to the right domain's answer().
-
-    movie_ctx = (hits, broken, bookable, tally), bus_ctx = (hits, broken).
+    """Every domain this message is actually about - usually one, more than
+    one if it explicitly names several (e.g. "watch movie X and also watch
+    bus from A to B"), so nothing gets silently dropped from a combined
+    request the way a single-winner keyword match would.
     """
-    if classify(cmd) == "bus":
-        bus_runner.answer(cmd, *bus_ctx)
-    else:
-        movies_runner.answer(cmd, *movie_ctx)
+    low = (text or "").lower()
+    named = [name for name in DOMAINS if _mentions(name, low)]
+    if named:
+        return named
+
+    # Nothing named explicitly (e.g. bare "status"/"cancel") - route to
+    # whichever domain actually has a live watch, so generic wording still
+    # lands somewhere sensible without saying "movie"/"bus" every time.
+    active = [name for name, dom in DOMAINS.items() if dom["watchspec"].load()]
+    if len(active) == 1:
+        return active
+
+    # Still unclear (several or none active) - one cheap classification call.
+    guess = llm.classify_domain(text) if llm.available() else None
+    return [guess] if guess in DOMAINS else ["movie"]   # movie is the oldest, most familiar default
+
+
+def answer(chat_id, cmd, ctx_by_domain):
+    """Route one chat command to every domain it's actually about.
+
+    ctx_by_domain: {"movie": (hits, broken, bookable, tally), "bus": (hits, broken)}
+    """
+    for name in classify(cmd):
+        dom = DOMAINS.get(name)
+        if dom:
+            dom["runner"].answer(chat_id, cmd, *ctx_by_domain[name])

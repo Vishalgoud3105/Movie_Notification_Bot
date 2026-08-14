@@ -99,7 +99,7 @@ def demo():
     keep_chat = os.environ.get("TELEGRAM_CHAT_ID")
     os.environ["TELEGRAM_CHAT_ID"] = "999"
     st = {"tg_offset": 0}
-    assert poll_commands(st) == ["report", "hello"], "must ignore other chats"
+    assert poll_commands(st) == [(999, "report"), (999, "hello")], "must ignore other chats"
     assert st["tg_offset"] == 10, st                 # acked past the last update
     telegram.requests.post = real_post
     if keep_chat is not None:
@@ -125,9 +125,14 @@ def demo():
     demo_brain()
     demo_group_chats()
 
-    # blank filters = report everything. VENUES too: demo_brain() restores the
-    # .env defaults on exit, which re-applies a venue filter to every module.
+    # blank filters = report everything. Explicitly reset every field
+    # shows_for() reads, not just FORMAT/LANGUAGE/VENUES - demo_brain()'s
+    # multi-watch lifecycle test pushes real values onto bms's globals too
+    # (watchspec._push() touches every _TARGETS module, bms included) and,
+    # unlike the old single-watch design, nothing resets them back to .env
+    # defaults afterward - there is no more "defaults" to fall back to.
     bms.FORMAT, bms.LANGUAGE, bms.VENUES = "", "", []
+    bms.TIME_FROM, bms.TIME_TO = "06:00", "20:00"   # excludes the 11:30 PM show
     assert len(shows_for(payload, "20260808")) == 5
     print("self-check ok")
 
@@ -194,7 +199,7 @@ def demo_group_chats():
 
         # 3. a message from the now-known group is accepted like any other chat
         pending = [{"update_id": 3, "message": {"chat": {"id": -500}, "text": "status"}}]
-        assert poll_commands(st) == ["status"]
+        assert poll_commands(st) == [(-500, "status")]
 
         # 4. losing access drops a chat regardless of who removed it - Telegram
         # itself reporting "kicked" is authoritative, no owner check needed here
@@ -309,7 +314,8 @@ def demo_brain():
                                    "city": "hyderabad", "movie_id": "1", "cities": []}
     assert "which dates" in brain._apply_new_watch({"title": "Some Film"}).lower()
 
-    # full lifecycle: start a watch, then finish it and fall back to defaults
+    # full lifecycle: start a watch, apply it, finish it - and a second,
+    # independent watch alongside it (multi-watch, not just one-at-a-time)
     keep_watch, keep_state = watchspec.WATCH_FILE, None
     watchspec.WATCH_FILE = os.path.join(tempfile.gettempdir(), "_watch_test.json")
     from watcher.movies import state as sm
@@ -320,30 +326,52 @@ def demo_brain():
             "title": "Some Film", "dates": ["2026-08-08"], "format": "IMAX",
             "venues": ["Forum"], "time_from": "10:00", "time_to": "22:00"})
         assert "Watching" in msg, msg
-        active = watchspec.load()
-        assert active and active["active"] and active["format"] == "IMAX", active
-        # the live values must actually have moved, not just been stored
+        active = watchspec.load_all()
+        assert len(active) == 1 and active[0]["active"] and active[0]["format"] == "IMAX", active
+        spec1 = active[0]
+
+        # apply() pushes exactly this one spec's fields onto the live globals -
+        # run_cycle() calls it once per active spec, right before scanning it
         from watcher.movies import district
+        watchspec.apply(spec1)
         assert district.FORMAT == "IMAX" and district.VENUES == ["forum"], district.FORMAT
         assert district.DATES == ["20260808"], district.DATES
 
-        # simulate a restart: the process forgets everything, boot() must put
-        # the stored watch back or the watcher silently reverts to .env
+        # a second, independent movie can be watched at the same time
+        msg2 = brain._apply_new_watch({
+            "title": "Some Film", "dates": ["2026-08-09"], "format": "2D",
+            "venues": [], "time_from": "00:00", "time_to": "23:59"})
+        assert "Watching" in msg2, msg2
+        assert len(watchspec.load_all()) == 2, watchspec.load_all()
+
+        # asking to watch the SAME movie+dates again reinforces spec1 rather
+        # than creating a wasteful third, duplicate entry
+        brain._apply_new_watch({
+            "title": "Some Film", "dates": ["2026-08-08"], "format": "IMAX",
+            "venues": ["Forum"], "time_from": "10:00", "time_to": "22:00"})
+        assert len(watchspec.load_all()) == 2, "must dedup against an identical watch"
+
+        # simulate a restart: globals get wiped, re-applying the reloaded spec
+        # must put the exact same values back - boot() itself no longer pushes
+        # anything (see its docstring), run_cycle() re-applies fresh every cycle
         district.FORMAT, district.VENUES, district.DATES = "WIPED", [], ["19990101"]
-        from watcher.movies.runner import boot
-        resumed = boot()
-        assert resumed and resumed["format"] == "IMAX", resumed
-        assert district.FORMAT == "IMAX", "boot() must re-apply the stored watch"
+        reloaded = next(w for w in watchspec.load_all() if w["id"] == spec1["id"])
+        watchspec.apply(reloaded)
+        assert district.FORMAT == "IMAX", "apply() must restore the stored spec's values"
         assert district.DATES == ["20260808"], district.DATES
 
-        ended = watchspec.finish("found")
-        assert ended["active"] is False and ended["ended_reason"] == "found"
-        assert watchspec.load() is None, "a finished watch must not stay active"
-        assert district.FORMAT == watchspec._DEFAULTS["format"], "must restore defaults"
+        ended = watchspec.finish(spec1["id"], "found")
+        assert len(ended) == 1 and ended[0]["active"] is False and ended[0]["ended_reason"] == "found"
+        remaining = watchspec.load_all()
+        assert len(remaining) == 1 and remaining[0]["format"] == "2D", \
+            "finishing one watch must not touch the other"
+
+        ended_all = watchspec.finish(None, "cancelled")
+        assert len(ended_all) == 1
+        assert watchspec.load_all() == [], "finish(None) must stop every active watch"
     finally:
         for f in (watchspec.WATCH_FILE, sm.STATE_FILE):
             if os.path.exists(f):
                 os.remove(f)
         watchspec.WATCH_FILE, sm.STATE_FILE = keep_watch, keep_state
         search.find, llm.available = real_find, real_available
-        watchspec.apply(None)

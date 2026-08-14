@@ -103,7 +103,12 @@ def alert_text(by_date):
 
 
 def shift_report(t):
-    """End-of-shift summary: proof the bot is alive and what it saw."""
+    """End-of-shift summary: proof the bot is alive and what it saw.
+
+    `t["watches"]` is {watch_id: {"title", "found": {date_code: count}}} -
+    built fresh each cycle in run_cycle(), one entry per movie active during
+    the shift; several can be listed here, not just one.
+    """
     name = t["name"]
     lo, hi = next(((a, b) for n, a, b in SHIFTS if n == name), (0, 0))
     nxt = SHIFTS[(([s[0] for s in SHIFTS].index(name)) + 1) % len(SHIFTS)]
@@ -118,44 +123,59 @@ def shift_report(t):
                                       else "%d failed check(s) ⚠️" % t["errors"])]
     if t.get("bookable"):
         lines.append("📆 Tickets on sale up to: %s" % pretty_date(t["bookable"]))
-    # Any of these can be blank when a watch was set from chat without naming
-    # them, so build from the parts that exist rather than a fixed template.
-    what = " ".join(x for x in (LANGUAGE, FORMAT) if x) or "any show"
-    if VENUES:
-        what += " at " + ", ".join(v.title() for v in VENUES)
-    lines += ["", "🎯 Watching %s, %s-%s:" % (what, TIME_FROM, TIME_TO)]
-    for date_code in DATES:
-        n = (t.get("found") or {}).get(date_code, 0)
-        lines.append("  %s %s - %s" % ("✅" if n else "🔒", pretty_date(date_code),
-                                       "%d shows FOUND, alert sent!" % n if n
-                                       else "no %s shows scheduled yet"
-                                            % (FORMAT or "matching")))
-    if all((t.get("found") or {}).get(d) for d in DATES):
-        lines += ["", "🎉 Both dates are open. My job here is done!"]
+
+    lines.append("")
+    watches = t.get("watches") or {}
+    if not watches:
+        lines.append("😴 No movie being watched right now.")
     else:
-        lines += ["", "⏭️ Next up: %s shift (%02d:00-%02d:00). Still watching. 👀"
-                  % (nxt[0], nxt[1], nxt[2])]
+        all_found = True
+        for w in watches.values():
+            lines.append("🎯 Watching: %s" % w["title"])
+            found = w.get("found") or {}
+            for date_code, n in found.items():
+                lines.append("  %s %s - %s" % ("✅" if n else "🔒", pretty_date(date_code),
+                                               "%d shows FOUND, alert sent!" % n if n
+                                               else "no matching shows scheduled yet"))
+            if not (found and all(found.values())):
+                all_found = False
+        if all_found:
+            lines += ["", "🎉 Everything's open. My job here is done!"]
+    lines += ["", "⏭️ Next up: %s shift (%02d:00-%02d:00). Still watching. 👀"
+              % (nxt[0], nxt[1], nxt[2])]
     return "\n".join(lines)
 
 
 def live_report(hits, broken, bookable, checks=1):
     """A shift report describing this very moment, from an already-done scan.
 
-    Short-circuits when nothing is being watched - without this, a "status"
-    request while idle would show the .env-configured field names (DATES,
-    FORMAT, VENUES still hold their original values, just unused for scanning
-    - see movies/runner.py::run_cycle()) as if they were a live default watch.
+    `hits` is {watch_id: {date_code: [(key, show), ...]}} - see
+    movies/runner.py::run_cycle(). Short-circuits when nothing is being
+    watched, rather than showing stale .env-configured field values as if
+    they were a live default watch.
     """
     from . import watchspec
-    if not watchspec.load():
+    watches = watchspec.load_all()
+    if not watches:
         return ("😴 No movie is being watched right now. Tell me what to "
                 "watch, e.g. \"%s\"." % example_watch_phrase())
+
     now = dt.datetime.now(IST)
     shift = shift_at(now)
     name = shift[0] if shift else SHIFTS[-1][0]   # 00:00-07:00: report the shift just ended
     stamp = now.strftime("%I:%M %p").lstrip("0")
+
+    tally_watches = {}
+    for w in watches:
+        wid = w["id"]
+        wh = (hits or {}).get(wid, {})
+        tally_watches[wid] = {
+            "title": w.get("title"),
+            "found": {dc.replace("-", ""): len(wh.get(dc.replace("-", ""), []))
+                     for dc in w.get("dates", [])},
+        }
     return shift_report({
         "name": name, "date": now.strftime("%Y%m%d"), "checks": checks,
         "first": stamp, "last": stamp, "errors": len(broken), "bookable": bookable,
-        "found": {d: len(hits.get(d, [])) for d in DATES},
+        "watches": tally_watches,
     })

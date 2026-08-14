@@ -127,6 +127,17 @@ def _send_one(token, chat, text):
     return ok
 
 
+def reply_to(chat, text):
+    """Send to exactly one chat - for answering a command from that chat
+    specifically, not broadcasting to every known chat like send_telegram()
+    does for alerts/shift-reports. Never raises."""
+    token = os.environ.get("TELEGRAM_API_TOKEN")
+    if not token:
+        print("no telegram creds set; message was:\n" + text)
+        return False
+    return _send_one(token, str(chat), text)
+
+
 def send_telegram(text):
     """Broadcast to every known chat. Returns True only if every chat got it."""
     token = os.environ.get("TELEGRAM_API_TOKEN")
@@ -140,6 +151,10 @@ def send_telegram(text):
 
 def poll_commands(state, wait=0):
     """Read anything typed to the bot, from any known chat.
+
+    Returns a list of (chat_id, text) pairs, not bare text - callers need the
+    chat id to reply only where the command came from (reply_to()), not
+    broadcast the reply everywhere (send_telegram()).
 
     wait=0 returns immediately with whatever is queued - used by one-shot runs.
     wait=N is a long poll: Telegram holds the connection open until you send
@@ -195,11 +210,12 @@ def poll_commands(state, wait=0):
     for u in updates:
         state["tg_offset"] = u["update_id"] + 1      # ack, so it is not replayed
         msg = u.get("message") or u.get("edited_message") or {}
-        if str((msg.get("chat") or {}).get("id")) not in chats:
+        chat_id = (msg.get("chat") or {}).get("id")
+        if str(chat_id) not in chats:
             continue                                  # not a known chat - ignore
         text = (msg.get("text") or "").strip().lower().lstrip("/")
         if text:
-            commands.append(text.replace("@", " "))
+            commands.append((chat_id, text.replace("@", " ")))
     return commands
 
 

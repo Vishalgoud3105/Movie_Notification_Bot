@@ -1,8 +1,8 @@
 """What the bot says when the owner moves it into a new group.
 
 Generated fresh via the LLM each time, not a canned template - varied
-phrasing and examples, and grounded in whatever is actually being watched
-right now rather than always the same hardcoded route/movie. Falls back to a
+wording every time, grounded in whatever is actually being watched right
+now rather than always the same hardcoded route/movie. Falls back to a
 static message if Groq is unavailable, same as every other LLM use in this
 project: never a dependency of anything the bot actually has to do.
 
@@ -17,36 +17,45 @@ You are Notify AI: you watch for things to become available - movie tickets,
 bus fares, more domains may come later - and alert the moment they do. You
 never book anything, only watch.
 
-Write a warm, concrete welcome message, 6-10 short lines. Vary your wording
-and examples every time you're asked this - do not settle into a template.
-Cover, in your own words:
-- what you do and why it's useful (never miss a ticket/fare drop)
-- one realistic example of a movie watch request, in plain English
-- one realistic example of a bus watch request, in plain English, including
-  that a price target is optional
-- that anyone in this group can talk to you, ask "status", or say "cancel"
-- that a status report also arrives automatically at the end of each shift
+Write a SHORT, SCANNABLE introduction - people skim group chats, not read
+paragraphs. Structure it like this, using your own wording (vary it every
+time you're asked, never settle into a fixed template):
+
+- One line saying who you are and what you do, in one sentence.
+- A "🎬 MOVIES" heading, then 1-2 short bullet points: how to ask (one
+  realistic example phrase) and what happens (alert the moment it opens).
+- A "🚌 BUS FARES" heading, then 1-2 short bullet points: how to ask (one
+  realistic example phrase, mention a price target is optional) and what
+  happens (alert on every new lowest fare, or once the target hits).
+- One closing line: anyone here can talk to you, "status" for a report,
+  "cancel" to stop a watch, and a report also arrives at each shift's end.
 
 FACTS YOU MAY USE - real current state, not from you:
 {facts}
 
-If a watch is already active per the facts, mention it naturally as a live
-example of what you're already doing, instead of inventing a fresh one.
-Never invent a movie, route, price or date that is not in the facts.
-No markdown. A little emoji is fine for warmth, not one per line.
+If a watch is already active per the facts, use it as the real example under
+that domain's bullet instead of inventing one. Never invent a movie, route,
+price or date that is not in the facts.
+
+Keep it under 12 lines total including headings and bullets. No walls of
+text, no single long paragraph - use real line breaks between sections.
+A little emoji is fine for headings, not one per line.
 """
 
 _FALLBACK = "\n".join([
     "👋 Hey! I'm Notify AI - I watch for things to become available and ping "
-    "this chat the moment they do. I never book anything, I just watch.",
+    "this chat the moment they do. I never book anything, just watch.",
     "",
-    "🎬 Tell me a movie to watch: name, dates, format, venue.",
-    "🚌 Tell me a bus route to watch: from, to, date, and optionally a price "
-    "target - I'll alert on every new lowest fare, or once your target is hit.",
+    "🎬 MOVIES",
+    "• \"watch <movie> <format> at <venue> on <dates>\"",
+    "• I alert the moment tickets open.",
     "",
-    "Anyone here can talk to me - ask \"status\" any time, or \"cancel\" to stop "
-    "a watch. I'll also send a report at the end of each shift so you know "
-    "I'm still alive even when nothing's changed yet.",
+    "🚌 BUS FARES",
+    "• \"watch bus from <city> to <city> on <date>\", target price optional.",
+    "• I alert on every new lowest fare, or once your target hits.",
+    "",
+    "Anyone here can talk to me - \"status\" for a report, \"cancel\" to stop "
+    "a watch. A report also lands at the end of each shift.",
 ])
 
 

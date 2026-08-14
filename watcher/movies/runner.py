@@ -13,11 +13,13 @@ from .config import *
 from .messages import alert_text, live_report, pretty_date, shift_report
 from .shifts import maybe_report_shift, shift_at
 from .state import load_state, save_state
-from ..telegram import poll_commands, send_telegram, wants_report
+from ..telegram import poll_commands, reply_to, send_telegram, wants_report
 
 
-def answer(cmd, hits, broken, bookable, tally=None):
-    """Reply to one chat message about the movie watch.
+def answer(chat_id, cmd, hits, broken, bookable, tally=None):
+    """Reply to one chat message about the movie watch(es) - to `chat_id`
+    only, never broadcast (an alert/shift report is a different, proactive
+    path that still uses send_telegram() to reach every known chat).
 
     Tries the brain (LLM + watch handling) first, but any failure there must
     still leave you with a working status command, so it falls through to the
@@ -28,17 +30,17 @@ def answer(cmd, hits, broken, bookable, tally=None):
         from .brain import handle
         reply = handle(cmd, hits, broken, bookable, tally)
         if reply:
-            send_telegram(reply)
+            reply_to(chat_id, reply)
             return
     except Exception as e:                      # never let chat break the watcher
         print("brain failed, falling back to keywords: %s: %s" % (type(e).__name__, e))
 
     if wants_report(cmd):
-        send_telegram(live_report(hits, broken, bookable,
-                                  checks=(tally or {}).get("checks", 1)))
+        reply_to(chat_id, live_report(hits, broken, bookable,
+                                      checks=(tally or {}).get("checks", 1)))
     else:
-        send_telegram("\n".join([
-            "🤖 I'm watching %s for you." % SITE,
+        reply_to(chat_id, "\n".join([
+            "🤖 I'm here to watch movies for you.",
             "",
             "I'm not an AI - I just look for a keyword. Say any of:",
             "  report · status · check · update · news",
@@ -46,45 +48,52 @@ def answer(cmd, hits, broken, bookable, tally=None):
             "  e.g. \"report\", \"/status\", \"any update?\"",
             "",
             "You'll also get a report at the end of each shift,",
-            "and one 🚨 alert the moment %s opens for %s."
-            % (FORMAT, " & ".join(pretty_date(d) for d in DATES))]))
+            "and one 🚨 alert the moment what you're watching opens."]))
 
 
 def boot():
-    """Re-apply a chat-set watch before anything reads the settings.
+    """Log what's currently being watched.
 
-    Without this a watch set by message survives in watch.json but not in the
-    process: after a systemd restart or reboot the watcher silently reverts to
-    the .env defaults and watches the wrong thing while looking healthy.
-    Imported lazily because watchspec imports this module.
+    Nothing to push into globals here anymore - run_cycle() applies each
+    active spec fresh, in turn, every cycle (see watchspec.py's docstring),
+    so there's no persistent "current" global state to resume into at
+    process start the way the old single-watch design needed.
     """
     from . import watchspec
-    spec = watchspec.apply()
-    if spec:
-        from .messages import pretty_spec
-        print("resuming watch: %s" % pretty_spec(spec))
-    return spec
+    from .messages import pretty_spec
+    watches = watchspec.load_all()
+    for w in watches:
+        print("resuming watch: %s" % pretty_spec(w))
+    return watches
 
 
 def run_cycle(state, session, jitter=False):
-    """One full check: shift boundary, scan, alert, tally. Saves state.
+    """One full check: shift boundary, scan every active movie, alert, tally.
+    Saves state. Shared by the one-shot run and the long-running server, so
+    both behave identically - only how often they are called differs.
 
-    Shared by the one-shot run and the long-running server, so both behave
-    identically - only how often they are called differs.
+    Loops over every active watch (watchspec.load_all()), pushing each one's
+    fields onto the live globals in turn (watchspec.apply(spec)) right before
+    scanning it - see watchspec.py's module docstring for why this reuses the
+    single-spec-push machinery in a loop rather than rewriting bms.py/
+    district.py to take an explicit spec argument. Scans nothing at all until
+    at least one movie has actually been set to watch by chat - there is no
+    standing default anymore, same reasoning bus/runner.py has always used.
 
-    Scans nothing until a movie has actually been set to watch by chat - there
-    is no standing default anymore (the old .env-configured Spider-Man watch
-    only still exists as the *shape* new watches take, via watchspec._DEFAULTS'
-    field names; it is never auto-adopted as something to scan for). Same
-    reasoning bus/runner.py has always used, now applied here too.
+    Seen-show keys are namespaced "<watch_id>|<key>" so two different movies
+    can never collide in the shared dedup set even if they coincidentally
+    produce the same composite key.
+
+    Returns (hits, broken, bookable, tally) where hits is now
+    {watch_id: {date_code: [(key, show), ...]}} rather than a flat per-date
+    dict, since more than one movie can be active - see brain.py::_facts()
+    and messages.py::live_report() for how callers read the new shape.
     """
     from . import watchspec
-    seen = set(state["seen"])
-    now = dt.datetime.now(IST)
-    spec = watchspec.load()
-    tally = maybe_report_shift(state, watching=bool(spec))
+    specs = watchspec.load_all()
+    tally = maybe_report_shift(state, watching=bool(specs))
 
-    if not spec:
+    if not specs:
         state["shift"] = tally
         save_state(state)
         return {}, [], None, tally
@@ -94,53 +103,64 @@ def run_cycle(state, session, jitter=False):
         # request out of the top-of-the-minute crowd.
         time.sleep(random.uniform(0, 45))
 
-    hits, broken, bookable = scan(session)
-    all_keys = {k for date_shows in hits.values() for k, _ in date_shows}
-    fresh = [(dc, s) for dc in DATES for k, s in hits.get(dc, []) if k not in seen]
+    seen = set(state["seen"])
+    combined_hits, all_broken, all_bookable = {}, [], None
 
-    if tally:
+    for spec in specs:
+        watchspec.apply(spec)
+        wid = spec["id"]
+        now = dt.datetime.now(IST)
+
+        hits, broken, bookable = scan(session)
+        combined_hits[wid] = hits
+        all_broken += broken
         if bookable:
-            tally["bookable"] = bookable
-        for date_code in DATES:
-            tally["found"][date_code] = max(len(hits.get(date_code, [])),
-                                            tally["found"].get(date_code, 0))
-        tally["checks"] += 1
-        tally["errors"] += len(broken)
-        stamp = now.strftime("%I:%M %p").lstrip("0")
-        tally["first"] = tally["first"] or stamp
-        tally["last"] = stamp
+            all_bookable = bookable if not all_bookable else max(all_bookable, bookable)
 
-    delivered = True
-    if fresh:
-        by_date = {}
-        for date_code, show in fresh:
-            by_date.setdefault(date_code, []).append(show)
-        delivered = send_telegram(alert_text(by_date))
-        if not delivered:
-            print("ALERT NOT DELIVERED - not marking these shows as seen, "
-                  "so the next cycle tries again")
-    else:
-        print("nothing new")
+        if tally is not None:
+            entry = tally["watches"].setdefault(wid, {"title": spec.get("title"), "found": {}})
+            for date_code in DATES:
+                entry["found"][date_code] = len(hits.get(date_code, []))
+            if bookable:
+                tally["bookable"] = all_bookable
+            tally["checks"] += 1
+            tally["errors"] += len(broken)
+            stamp = now.strftime("%I:%M %p").lstrip("0")
+            tally["first"] = tally["first"] or stamp
+            tally["last"] = stamp
 
-    # Only remember shows once the alert for them actually went out. Marking
-    # them seen on a failed send would drop the one message that matters and
-    # never retry it.
-    state["seen"] = sorted(all_keys | seen) if delivered else sorted(seen)
+        all_keys = {k for date_shows in hits.values() for k, _ in date_shows}
+        fresh = [(dc, s) for dc in DATES for k, s in hits.get(dc, []) if (wid + "|" + k) not in seen]
 
+        delivered = True
+        if fresh:
+            by_date = {}
+            for date_code, show in fresh:
+                by_date.setdefault(date_code, []).append(show)
+            delivered = send_telegram(alert_text(by_date))
+            if not delivered:
+                print("ALERT NOT DELIVERED for %s - not marking these shows as "
+                      "seen, so the next cycle tries again" % spec.get("title"))
+        else:
+            print("nothing new for %s" % spec.get("title"))
+
+        # Only remember shows once the alert for them actually went out. Marking
+        # them seen on a failed send would drop the one message that matters and
+        # never retry it.
+        if delivered:
+            seen |= {wid + "|" + k for k in all_keys}
+
+        # Goal reached: every watched date now has shows and the alert went
+        # out, so release JUST this watch and keep scanning the rest.
+        if delivered and fresh and all(hits.get(d) for d in DATES):
+            watchspec.finish(wid, "found")
+            send_telegram("✅ %s - that's everything I was watching for! Alert "
+                          "sent above. Tell me what's next." % spec.get("title"))
+
+    state["seen"] = sorted(seen)
     state["shift"] = tally
     save_state(state)
-
-    # Goal reached: every watched date now has shows and the alert went out, so
-    # release the watch and be ready for the next request. Done after the save
-    # above, because finish() rewrites the state file itself - returning early
-    # here would have quietly discarded this cycle's tally.
-    if delivered and fresh and all(hits.get(d) for d in DATES):
-        from . import watchspec
-        if watchspec.load():
-            watchspec.finish("found")
-            send_telegram("✅ That's everything I was watching for - alert sent "
-                          "above. I'm now free; tell me what to watch next.")
-    return hits, broken, bookable, tally
+    return combined_hits, all_broken, all_bookable, tally
 
 
 def main():
@@ -152,8 +172,8 @@ def main():
 
     # Anything typed into the chat since the last run. Uses the scan above, so
     # asking for a report costs BookMyShow no extra requests.
-    for cmd in poll_commands(state):
-        answer(cmd, hits, broken, bookable, tally)
+    for chat_id, cmd in poll_commands(state):
+        answer(chat_id, cmd, hits, broken, bookable, tally)
     save_state(state)
 
     if broken:
@@ -178,6 +198,10 @@ def test_run():
     send nothing, and prove nothing. So this looks at dates that ARE open and
     relaxes the format filter if it has to, guaranteeing a real message arrives.
     Never touches seen.json, so it cannot suppress the real alert later.
+
+    Uses the .env-configured field values directly (FORMAT/DATES/MOVIE_NAME/...),
+    not any chat-set watch - this is a standalone diagnostic probe, run as its
+    own CLI mode (--test), never interleaved with run_cycle()'s per-spec loop.
     """
     boot()
     from . import district
@@ -269,8 +293,8 @@ def serve():
     interval old and is exactly what a scheduled run would have reported.
     """
     boot()
-    print("serving: chat replies are instant, %s scanned every %d min. Ctrl-C to stop."
-          % (SITE, SCAN_EVERY // 60))
+    print("serving: chat replies are instant, %s scanned every %d min for "
+          "whatever's being watched. Ctrl-C to stop." % (SITE, SCAN_EVERY // 60))
     state = load_state()
     session = requests.Session()
     hits, broken, bookable, tally = {}, [], None, None
@@ -285,12 +309,12 @@ def serve():
                 # Costs nothing when no shift ended, so the report lands on the
                 # boundary instead of waiting for the next scan.
                 from . import watchspec
-                tally = maybe_report_shift(state, watching=bool(watchspec.load()))
+                tally = maybe_report_shift(state, watching=bool(watchspec.load_all()))
 
             # Blocks here until you type something or the long poll times out,
             # so a reply costs no polling and arrives in about a second.
-            for cmd in poll_commands(state, wait=LONG_POLL):
-                answer(cmd, hits, broken, bookable, tally)
+            for chat_id, cmd in poll_commands(state, wait=LONG_POLL):
+                answer(chat_id, cmd, hits, broken, bookable, tally)
             save_state(state)
         except KeyboardInterrupt:
             print("stopped")

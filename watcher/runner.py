@@ -57,12 +57,14 @@ def serve():
             else:
                 from .bus.shifts import maybe_report_shift as maybe_report_bus_shift
                 from .movies.shifts import maybe_report_shift
-                movie_tally = maybe_report_shift(state, watching=bool(movie_watchspec.load()))
-                maybe_report_bus_shift(bus_state, watching=bool(bus_watchspec.load()))
+                movie_tally = maybe_report_shift(state, watching=bool(movie_watchspec.load_all()))
+                maybe_report_bus_shift(bus_state, watching=bool(bus_watchspec.load_all()))
 
-            for cmd in poll_commands(state, wait=LONG_POLL):
-                router.answer(cmd, (movie_hits, movie_broken, movie_bookable, movie_tally),
-                              (bus_hits, bus_broken))
+            for chat_id, cmd in poll_commands(state, wait=LONG_POLL):
+                router.answer(chat_id, cmd, {
+                    "movie": (movie_hits, movie_broken, movie_bookable, movie_tally),
+                    "bus": (bus_hits, bus_broken),
+                })
             save_state(state)
             bus_state_mod.save_state(bus_state)
         except KeyboardInterrupt:
