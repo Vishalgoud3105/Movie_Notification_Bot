@@ -15,6 +15,20 @@ City ids are resolved live and cached per-process (_cache) rather than kept
 as a static list - a fixed list would only ever cover the handful of cities
 someone happened to test, the same reason movies/search.py resolves titles
 against District's real catalogue instead of a fixed movie list.
+
+Deep link, captured and verified 14 Aug 2026 (cold, zero cookies - a user
+tapping this fresh from Telegram gets the exact bus's seat map, not the
+generic search list):
+
+  https://www.abhibus.com/seat-layout-web/?sourceid=<id>&destinationid=<id>
+    &jdate=<YYYY-MM-DD>&serviceKey=<serviceKey>&operatorId=<operatorId>&prd=mobile
+
+serviceKey/operatorId come straight off each service in the search response
+(added to Hit below). One operator (TGSRTC, a state RTC) failed to resolve
+in testing even with a matching warm-up visit, while every other operator
+tried succeeded cold - a state-RTC-routing quirk on AbhiBus's end, not
+something to chase further; the deep link is still strictly better than the
+search-results-page link for the large majority of operators.
 """
 
 import datetime as dt
@@ -179,6 +193,21 @@ def search(from_city, to_city, date_code):
         seats = svc.get("seatStats") or {}
         dep_ts = timings.get("startTimestamp")
         dep_date = dt.datetime.fromtimestamp(dep_ts, IST).date() if dep_ts else None
+
+        service_key, operator_id = svc.get("serviceKey"), svc.get("operatorId")
+        seat_url = None
+        if service_key and operator_id:
+            # Deep link straight to this bus's seat map - see module docstring.
+            # Best-effort only: verified working for some operators (e.g.
+            # zingbus plus) and failing for others (TGSRTC, IntrCity SmartBus)
+            # with the exact same URL shape - an operator-side backend
+            # difference we cannot predict from the search response, so this
+            # is offered ALONGSIDE book_url (the search list), never instead
+            # of it - a broken deep link must never be the only link sent.
+            seat_url = ("%s/seat-layout-web/?sourceid=%s&destinationid=%s&jdate=%s"
+                       "&serviceKey=%s&operatorId=%s&prd=mobile"
+                       % (BASE, src_id, dst_id, jdate, service_key, operator_id))
+
         hits.append({
             "operator": svc.get("travelerAgentName") or "?",
             "price": fare,
@@ -188,6 +217,7 @@ def search(from_city, to_city, date_code):
                                    timings.get("arriveTimestamp"), dep_date),
             "seats_left": seats.get("availableSeats"),
             "source": "abhibus",
-            "book_url": referer,   # the search results page - pick the bus, book from there
+            "book_url": referer,       # the search results page - always works
+            "seat_url": seat_url,      # direct to this bus's seats - best-effort
         })
     return hits

@@ -23,6 +23,21 @@ def pretty_spec(spec):
     return " · ".join(bits)
 
 
+def _links(hit):
+    """The link block for one hit: a best-effort direct-to-seats deep link
+    (works for some operators, e.g. zingbus plus; confirmed failing for
+    others, e.g. TGSRTC/IntrCity SmartBus, with no way to predict which from
+    the search data) ALWAYS alongside the plain search-results link, which
+    always works - never send the deep link alone, a broken one with no
+    fallback is worse than not having it."""
+    lines = []
+    if hit.get("seat_url"):
+        lines.append("🔗 Seats: %s" % hit["seat_url"])
+    if hit.get("book_url"):
+        lines.append("🔗 Search: %s" % hit["book_url"])
+    return lines
+
+
 def alert_text(hit, previous_low, spec):
     """A new session-low fare. `previous_low` is None on the first hit found."""
     lines = [
@@ -38,13 +53,15 @@ def alert_text(hit, previous_low, spec):
         lines.append("🎟️ %s seats left" % hit["seats_left"])
     if previous_low:
         lines.append("⬇️ was ₹%s" % previous_low)
-    if hit.get("book_url"):
-        lines += ["", "🔗 %s" % hit["book_url"]]
+    links = _links(hit)
+    if links:
+        lines += [""] + links
     return "\n".join(lines)
 
 
 def target_met_text(hit, spec):
     """The one-shot alert when a target price is reached - the goal, watch ends."""
+    links = _links(hit)
     return "\n".join([
         "✅🚌 TARGET PRICE HIT!",
         "",
@@ -53,7 +70,7 @@ def target_met_text(hit, spec):
         "🏷️ ₹%s on %s (%s) - at or under your ₹%s target"
         % (hit["price"], hit["operator"], hit["source"], spec["target_price"]),
         "",
-    ] + (["🔗 %s" % hit["book_url"], ""] if hit.get("book_url") else []) + [
+    ] + (links + [""] if links else []) + [
         "I'm done watching this route. Tell me what's next.",
     ])
 
@@ -104,8 +121,7 @@ def status_text(specs, hits, broken):
         lines.append("")
         lines.append("📊 Cheapest right now overall: ₹%s on %s (%s)"
                      % (cheapest["price"], cheapest["operator"], cheapest["source"]))
-        if cheapest.get("book_url"):
-            lines.append("🔗 %s" % cheapest["book_url"])
+        lines += _links(cheapest)
     if broken:
         lines.append("⚠️ Could not reach: %s" % ", ".join(broken))
     return "\n".join(lines)
