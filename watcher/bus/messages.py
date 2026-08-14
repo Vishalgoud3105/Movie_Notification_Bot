@@ -24,12 +24,12 @@ def pretty_spec(spec):
 
 
 def _links(hit):
-    """The link block for one hit: a best-effort direct-to-seats deep link
-    (works for some operators, e.g. zingbus plus; confirmed failing for
-    others, e.g. TGSRTC/IntrCity SmartBus, with no way to predict which from
-    the search data) ALWAYS alongside the plain search-results link, which
-    always works - never send the deep link alone, a broken one with no
-    fallback is worse than not having it."""
+    """The link block for one hit: the direct-to-seats deep link (verified
+    8/8 across different operators - see abhibus.py's docstring for the
+    field mixup that caused earlier failures) alongside the plain
+    search-results link as a fallback, in case some operator or route this
+    hasn't hit yet still doesn't resolve - a broken link with nothing to
+    fall back on is worse than one slightly redundant extra line."""
     lines = []
     if hit.get("seat_url"):
         lines.append("🔗 Seats: %s" % hit["seat_url"])

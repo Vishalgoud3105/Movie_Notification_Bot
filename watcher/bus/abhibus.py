@@ -21,13 +21,14 @@ tapping this fresh from Telegram gets the exact bus's seat map, not the
 generic search list):
 
   https://www.abhibus.com/seat-layout-web/?sourceid=<id>&destinationid=<id>
-    &jdate=<YYYY-MM-DD>&serviceKey=<serviceKey>&operatorId=<operatorId>&prd=mobile
+    &jdate=<YYYY-MM-DD>&serviceKey=<serviceId>&operatorId=<operatorId>&prd=mobile
 
-serviceKey/operatorId come straight off each service in the search response
-(added to Hit below). One operator (TGSRTC, a state RTC) failed to resolve
-in testing even with a matching warm-up visit, while every other operator
-tried succeeded cold - a state-RTC-routing quirk on AbhiBus's end, not
-something to chase further; the deep link is still strictly better than the
+The query param is named serviceKey but the value it actually needs is each
+service's serviceId field (a uniform 10-digit number), NOT its serviceKey
+field (format varies wildly per operator - hex, free text, tilde-composite -
+and does not work here despite the matching name). Confusing naming on
+AbhiBus's part: confirmed by testing 8 different operators - 0/8 worked
+with serviceKey, 8/8 worked with serviceId once that mixup was found.
 search-results-page link for the large majority of operators.
 """
 
@@ -194,19 +195,18 @@ def search(from_city, to_city, date_code):
         dep_ts = timings.get("startTimestamp")
         dep_date = dt.datetime.fromtimestamp(dep_ts, IST).date() if dep_ts else None
 
-        service_key, operator_id = svc.get("serviceKey"), svc.get("operatorId")
+        service_id, operator_id = svc.get("serviceId"), svc.get("operatorId")
         seat_url = None
-        if service_key and operator_id:
-            # Deep link straight to this bus's seat map - see module docstring.
-            # Best-effort only: verified working for some operators (e.g.
-            # zingbus plus) and failing for others (TGSRTC, IntrCity SmartBus)
-            # with the exact same URL shape - an operator-side backend
-            # difference we cannot predict from the search response, so this
-            # is offered ALONGSIDE book_url (the search list), never instead
-            # of it - a broken deep link must never be the only link sent.
+        if service_id and operator_id:
+            # Deep link straight to this bus's seat map - see module docstring
+            # for the serviceId-vs-serviceKey field mixup this depends on.
+            # Verified 8/8 across different operators once that was fixed -
+            # still sent alongside book_url (the search list), not instead of
+            # it, since a link that fails silently with no fallback is worse
+            # than a slightly redundant second one.
             seat_url = ("%s/seat-layout-web/?sourceid=%s&destinationid=%s&jdate=%s"
                        "&serviceKey=%s&operatorId=%s&prd=mobile"
-                       % (BASE, src_id, dst_id, jdate, service_key, operator_id))
+                       % (BASE, src_id, dst_id, jdate, service_id, operator_id))
 
         hits.append({
             "operator": svc.get("travelerAgentName") or "?",
