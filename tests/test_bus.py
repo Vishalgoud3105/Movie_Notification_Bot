@@ -27,9 +27,11 @@ def demo():
         _demo_watchspec_lifecycle()
         _demo_multi_watch()
         _demo_run_cycle(sent)
+        _demo_stale_status()
         _demo_shift_report()
         _demo_router()
         _demo_refuse_unresolvable()
+        _demo_seat_filtering()
     finally:
         if os.path.exists(watchspec.WATCH_FILE):
             os.remove(watchspec.WATCH_FILE)
@@ -153,6 +155,45 @@ def _demo_run_cycle(sent):
         assert len(sent) == 3, "an expiry must not alert"
     finally:
         sources.scan = real_scan
+
+
+def _demo_stale_status():
+    """status must never show fares left over from a route that was
+    cancelled/changed since the last scan - reported live: watch the 16th,
+    cancel it, watch the 14th instead, then ask "status" before the next
+    scheduled scan runs - it showed the 16th's old fare as if it were the
+    14th's. run_cycle_bus() tags each hit with its watch id; status_text()
+    must filter to only currently-active ids.
+    """
+    from watcher.bus import sources
+    from watcher.bus.messages import status_text
+
+    state = {"shift": None}
+    real_scan = sources.scan
+
+    try:
+        route16 = watchspec.start({"from_city": "hyderabad", "to_city": "nellore",
+                                   "date": "20260816", "target_price": None})
+        sources.scan = lambda *a, **k: ([{"operator": "Old Route Bus", "price": 999,
+                                          "seat_type": "seater", "source": "abhibus"}], [])
+        hits, broken = bus_runner.run_cycle_bus(state)
+        assert any(h.get("_watch_id") == route16["id"] for h in hits), hits
+
+        # cancel the 16th, start the 14th instead - no scan has happened for
+        # it yet, `hits` here is still what run_cycle_bus() just returned
+        # for the 16th (exactly the gap between scheduled scans in --serve)
+        watchspec.finish(route16["id"], "cancelled")
+        watchspec.start({"from_city": "hyderabad", "to_city": "nellore",
+                         "date": "20260814", "target_price": None})
+
+        reply = status_text(watchspec.load_all(), hits, broken)
+        assert "999" not in reply, \
+            "must not show the cancelled route's stale fare: %r" % reply
+        assert "Old Route Bus" not in reply, reply
+        assert "checking soon" in reply.lower(), reply
+    finally:
+        sources.scan = real_scan
+        watchspec.finish(None, "cancelled")
 
 
 def _demo_shift_report():
@@ -304,6 +345,51 @@ def _demo_refuse_unresolvable():
         assert watchspec.load() is None
     finally:
         abhibus.resolve = real_resolve
+
+
+def _demo_seat_filtering():
+    """AC/seat-type/gender filtering - the pure parsing/matching functions,
+    no network. Field mapping cross-checked 14 Aug 2026 against a real
+    captured response's "gentsSeats" list (LD5 there had "M" at this exact
+    position - see abhibus.py's module docstring)."""
+    from watcher.bus import abhibus
+
+    assert abhibus._matches_ac("AC Sleeper (2+1)", "ac") is True
+    assert abhibus._matches_ac("AC Sleeper (2+1)", "non_ac") is False
+    assert abhibus._matches_ac("NON-AC Seater (2+2)", "non_ac") is True
+    assert abhibus._matches_ac("NON-AC Seater (2+2)", "ac") is False, \
+        "'ac' must not match inside 'non-ac' - substring trap"
+    assert abhibus._matches_ac("anything", None) is True, "no filter = matches everything"
+
+    # real seat strings, lower deck, from an actual captured GetSeatLayout response
+    raw = {"TotalSeatList": {"lowerdeck_seat_nos": [
+        "LD1, 1, 1, LB, Y, M, 1534, 0, 76.55, 0.00, 0, 0,h,1342",   # available, male, berth
+        "LD3, 4, 1, LB, N, F, 1074, 0, 53.59, 0.00, 0, 0,h,939",    # NOT available
+        "LD5, 2, 3, LB, Y, M, 1200, 0, 60.00, 0.00, 0, 0,h,1051",   # available, male, cheaper
+    ], "upperdeck_seat_nos": [
+        "UD1, 1, 1, S, Y, F, 900, 0, 45.00, 0.00, 0, 0,h,800",      # available, female, seater
+    ]}}
+    seats = abhibus._parse_seats(raw)
+    assert len(seats) == 4, seats
+    ld1 = next(s for s in seats if s["seat_no"] == "LD1")
+    assert ld1 == {"seat_no": "LD1", "seat_type": "sleeper", "available": True,
+                   "gender": "male", "fare": 1534.0}, ld1
+    ud1 = next(s for s in seats if s["seat_no"] == "UD1")
+    assert ud1["seat_type"] == "seater" and ud1["gender"] == "female", ud1
+
+    # cheapest matching seat: must skip the unavailable one (LD3) and the
+    # wrong-gender one (UD1), landing on LD5 (cheaper than LD1, both male)
+    best = abhibus._cheapest_matching_seat(seats, gender="male", seat_type="sleeper")
+    assert best["seat_no"] == "LD5" and best["fare"] == 1200.0, best
+
+    best_female = abhibus._cheapest_matching_seat(seats, gender="female", seat_type=None)
+    assert best_female["seat_no"] == "UD1", best_female     # LD3 excluded: not available
+
+    assert abhibus._cheapest_matching_seat(seats, gender="female", seat_type="sleeper") is None, \
+        "no available female sleeper seat exists in this fixture"
+
+    assert abhibus._cheapest_matching_seat(seats, gender=None, seat_type=None)["seat_no"] == "UD1", \
+        "no filter at all -> cheapest available seat overall (UD1 @900, cheaper than LD5 @1200)"
 
 
 if __name__ == "__main__":

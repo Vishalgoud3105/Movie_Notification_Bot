@@ -14,10 +14,16 @@ same shape movies/sources.py already proved out.
 from . import abhibus
 
 
-def scan(from_city, to_city, date_code):
-    """One pass over AbhiBus. Returns (hits: list[Hit], broken: list[str])."""
+def scan(from_city, to_city, date_code, ac=None, seat_type=None, gender=None):
+    """One pass over AbhiBus. Returns (hits: list[Hit], broken: list[str]).
+
+    ac/seat_type/gender are optional filters straight from the watch spec -
+    see abhibus.search()'s docstring for what each costs (ac is free,
+    seat_type/gender cost one extra request per bus checked, bounded).
+    """
     try:
-        found = abhibus.search(from_city, to_city, date_code)
+        found = abhibus.search(from_city, to_city, date_code,
+                               ac=ac, seat_type=seat_type, gender=gender)
     except NotImplementedError as e:
         print("abhibus not wired up yet: %s" % e)
         return [], ["abhibus"]

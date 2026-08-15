@@ -90,6 +90,16 @@ def _apply_new_watch(spec):
             # `cheapest["price"] <= target` comparison every cycle forever.
             return "I didn't understand \"%s\" as a price - try a plain number, e.g. 800." % target_price
 
+    ac = spec.get("ac")
+    if ac not in (None, "ac", "non_ac"):
+        ac = None       # a hallucinated value - ignore rather than reject the whole watch
+    seat_type = spec.get("seat_type")
+    if seat_type not in (None, "sleeper", "seater"):
+        seat_type = None
+    gender = spec.get("gender")
+    if gender not in (None, "male", "female"):
+        gender = None
+
     refusal = _refuse_unresolvable(from_city, to_city)
     if refusal:
         return refusal
@@ -99,9 +109,14 @@ def _apply_new_watch(spec):
         "to_city": to_city.lower(),
         "date": date_code,
         "target_price": target_price,
+        "ac": ac,
+        "seat_type": seat_type,
+        "gender": gender,
     }
     # Watching the same route+date again reinforces the existing entry
-    # instead of starting a wasteful duplicate that double-scans it.
+    # instead of starting a wasteful duplicate that double-scans it - this
+    # also covers "same route, just change the seat filter" as an update
+    # to the existing watch rather than a second one for the same route.
     existing = next((w for w in watchspec.load_all()
                      if w.get("from_city") == watch["from_city"]
                      and w.get("to_city") == watch["to_city"]
@@ -113,9 +128,15 @@ def _apply_new_watch(spec):
     goal = ("I'll alert once a fare hits ₹%s or under, then stop." % watch["target_price"]
             if watch["target_price"] else
             "I'll alert every time I see a new lowest price.")
-    return ("🚌 Watching: %s -> %s on %s\n\n%s I check AbhiBus every %d "
+    filters = ", ".join(f for f in (
+        {"ac": "AC only", "non_ac": "Non-AC only"}.get(ac),
+        seat_type and ("%s only" % seat_type),
+        gender and ("%s seats only" % gender),
+    ) if f)
+    filter_note = "\nFilters: %s" % filters if filters else ""
+    return ("🚌 Watching: %s -> %s on %s%s\n\n%s I check AbhiBus every %d "
             "minutes. Say \"status\" any time."
-            % (from_city.title(), to_city.title(), date, goal, SCAN_EVERY // 60))
+            % (from_city.title(), to_city.title(), date, filter_note, goal, SCAN_EVERY // 60))
 
 
 def handle(message, hits=None, broken=None, tally=None):

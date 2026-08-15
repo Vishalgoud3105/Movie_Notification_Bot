@@ -79,6 +79,9 @@ def start(spec):
     """
     spec = dict(spec)
     spec.setdefault("target_price", None)
+    spec.setdefault("ac", None)          # "ac" | "non_ac" | None (any)
+    spec.setdefault("seat_type", None)   # "sleeper" | "seater" | None (any)
+    spec.setdefault("gender", None)      # "male" | "female" | None (any)
 
     watches = _load_raw()
     current = next((w for w in watches if w.get("id") == spec.get("id")), None) \

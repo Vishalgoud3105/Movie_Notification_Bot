@@ -18,6 +18,12 @@ def pretty_spec(spec):
     bits = ["%s -> %s" % (spec.get("from_city", "?").title(), spec.get("to_city", "?").title())]
     if spec.get("date"):
         bits.append("on " + pretty_date(spec["date"]))
+    if spec.get("ac"):
+        bits.append({"ac": "AC", "non_ac": "Non-AC"}[spec["ac"]])
+    if spec.get("seat_type"):
+        bits.append(spec["seat_type"].title())
+    if spec.get("gender"):
+        bits.append("%s seat" % spec["gender"])
     if spec.get("target_price"):
         bits.append("target ₹%s" % spec["target_price"])
     return " · ".join(bits)
@@ -49,6 +55,11 @@ def alert_text(hit, previous_low, spec):
         "💺 %s · %s -> %s" % (hit.get("seat_type", "seat"), hit.get("depart", "?"),
                               hit.get("arrive", "?")),
     ]
+    if hit.get("seat_no"):
+        # only present when a gender/seat-type filter matched a specific
+        # seat - the price above is already that seat's own fare, not the
+        # bus's generic "from ₹X"
+        lines.append("🪑 Seat %s" % hit["seat_no"])
     if hit.get("seats_left"):
         lines.append("🎟️ %s seats left" % hit["seats_left"])
     if previous_low:
@@ -69,6 +80,7 @@ def target_met_text(hit, spec):
                           pretty_date(spec["date"])),
         "🏷️ ₹%s on %s (%s) - at or under your ₹%s target"
         % (hit["price"], hit["operator"], hit["source"], spec["target_price"]),
+    ] + (["🪑 Seat %s" % hit["seat_no"]] if hit.get("seat_no") else []) + [
         "",
     ] + (links + [""] if links else []) + [
         "I'm done watching this route. Tell me what's next.",
@@ -107,7 +119,14 @@ def shift_report(t):
 def status_text(specs, hits, broken):
     """On-demand report: every route being watched, and the cheapest fare
     seen right now across all of them combined (hits is pooled from every
-    active route's scan this cycle - see run_cycle_bus())."""
+    active route's scan this cycle - see run_cycle_bus()).
+
+    Filters hits to only currently-active watch ids first - between
+    scheduled scans this reuses whatever the last cycle returned, and
+    without this filter a route that was just cancelled or changed to a
+    different date would show its old, no-longer-relevant fares as if they
+    belonged to the new watch until the next scan overwrites them.
+    """
     if not specs:
         return "🚌 No bus route is being watched right now. Say something like " \
                "\"watch bus from Hyderabad to Bangalore on 20 Aug\"."
@@ -116,12 +135,20 @@ def status_text(specs, hits, broken):
         lines.append("🚌 Watching: %s" % pretty_spec(spec))
         if spec.get("lowest_seen"):
             lines.append("   💰 Lowest seen so far: ₹%s" % spec["lowest_seen"])
-    if hits:
-        cheapest = min(hits, key=lambda h: h["price"])
+
+    active_ids = {s["id"] for s in specs}
+    relevant = [h for h in (hits or []) if h.get("_watch_id") in active_ids]
+    if relevant:
+        cheapest = min(relevant, key=lambda h: h["price"])
         lines.append("")
         lines.append("📊 Cheapest right now overall: ₹%s on %s (%s)"
                      % (cheapest["price"], cheapest["operator"], cheapest["source"]))
         lines += _links(cheapest)
+    elif hits:
+        # there IS pooled data, just none of it for a currently-active watch -
+        # say so rather than silently showing nothing with no explanation
+        lines.append("")
+        lines.append("📊 No fresh data for the current watch yet - checking soon.")
     if broken:
         lines.append("⚠️ Could not reach: %s" % ", ".join(broken))
     return "\n".join(lines)

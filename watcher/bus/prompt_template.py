@@ -18,6 +18,9 @@ Return exactly this shape, using null for anything the user did not say:
   "to_city": "<destination city, lowercase>",
   "date": "YYYY-MM-DD",
   "target_price": <number, or null if the user gave no price ceiling>,
+  "ac": "ac" | "non_ac" | null,
+  "seat_type": "sleeper" | "seater" | null,
+  "gender": "male" | "female" | null,
   "missing": ["<field names you could not fill that are needed>"]
 }
 
@@ -44,6 +47,14 @@ Rules:
   known city), leave it null and list it in "missing" rather than guessing.
 - Never invent a city or date the user did not give. Use null and list the
   field in "missing".
+- ac/seat_type/gender are all optional - leave null (meaning "any") unless
+  the user actually specifies. Recognize natural phrasing: "AC bus"/"non-AC",
+  "sleeper"/"seater"/"seat" (bare "seat" without berth/sleeper wording means
+  seat_type should stay null, not "seater" - only set it when they clearly
+  mean the reclining-seat type as opposed to a sleeping berth), "male
+  seat"/"gents seat"/"for men" -> gender "male", "female seat"/"ladies
+  seat"/"for women" -> gender "female". These filter which specific seat gets
+  reported, not the route.
 - Output raw JSON. No prose, no markdown fences.
 """
 

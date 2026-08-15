@@ -29,7 +29,28 @@ field (format varies wildly per operator - hex, free text, tilde-composite -
 and does not work here despite the matching name). Confusing naming on
 AbhiBus's part: confirmed by testing 8 different operators - 0/8 worked
 with serviceKey, 8/8 worked with serviceId once that mixup was found.
-search-results-page link for the large majority of operators.
+
+Seat-level filtering (gender, sleeper vs seater):
+
+  POST https://www.abhibus.com/wap/GetSeatLayout
+       body: {sourceid, destinationid, jdate, serviceKey: <serviceId>,
+              operatorId, prd, isReturnJourney, version, clevertapID}
+       -> per-seat data, "TotalSeatList.lowerdeck_seat_nos"/"upperdeck_seat_nos",
+          each seat a comma-separated string whose fields match the response's
+          own "titles" array: seat_no, row, col, seat_type (LB/UB = lower/
+          upper berth i.e. sleeper; other codes are seater), availability
+          (Y/N), gender (M/F), fare, ... Cross-checked 14 Aug 2026 against a
+          real response's "gentsSeats" list - a seat listed there had "M" in
+          this position, confirming the mapping.
+
+A bus's advertised "from ₹X" price is the minimum across ALL its seats, so it
+does not tell you the price of a specific gender/seat-type - that only comes
+from fetching this per-bus layout. AC/non-AC is different: that is whole-bus
+(busTypeName already says "AC .../"NON-AC ..."), so it costs nothing extra to
+filter on. Gender/seat-type filtering therefore costs one extra request per
+bus checked - see search()'s max_checks for how that is bounded, deliberately,
+after this project got rate-limited ("too many requests") from testing this
+endpoint too fast in a short window.
 """
 
 import datetime as dt
@@ -41,6 +62,14 @@ from ..config import IST
 BASE = "https://www.abhibus.com"
 SUGGEST_URL = BASE + "/wap/abus-autocompleter/api/v1/results"
 SEARCH_URL = BASE + "/buslist/v3/services"
+SEAT_LAYOUT_URL = BASE + "/wap/GetSeatLayout"
+
+# How many of the cheapest buses to open a seat layout for when a gender or
+# seat-type filter is set, before giving up for this cycle. Bounded on
+# purpose: AbhiBus rate-limited this project ("too many requests") after a
+# burst of testing, and a route can return 100+ buses - checking all of them
+# every 10-minute scan would be a real risk, not just a slow one.
+MAX_SEAT_CHECKS = 5
 
 _HEADERS = {
     "accept": "*/*",
@@ -133,7 +162,83 @@ def resolve(name):
     return _lookup(session, name.strip().lower())
 
 
-def search(from_city, to_city, date_code):
+def _matches_ac(bus_type_name, ac):
+    """ac: "ac" | "non_ac" | None. busTypeName is whole-bus (e.g. "AC Sleeper",
+    "NON-AC Seater") so this needs no extra request - check "non-ac"/"non ac"
+    first, since "ac" is a substring of both and would otherwise misclassify."""
+    if not ac:
+        return True
+    low = (bus_type_name or "").lower()
+    is_non_ac = "non-ac" in low or "non ac" in low
+    return is_non_ac if ac == "non_ac" else (ac == "ac" and not is_non_ac)
+
+
+def _parse_seats(data):
+    """The GetSeatLayout response -> flat list of
+    {"seat_no", "seat_type", "available", "gender", "fare"}.
+
+    Field order matches the response's own "titles" array; berth codes
+    (LB/UB - lower/upper berth) are sleeper seats, anything else is treated
+    as a seater - AbhiBus does not appear to use a richer seat-type code set
+    in the samples captured, but this is a heuristic, not a confirmed
+    enumeration of every possible code.
+    """
+    seats = []
+    total = (data or {}).get("TotalSeatList") or {}
+    for group in ("lowerdeck_seat_nos", "upperdeck_seat_nos"):
+        for raw in total.get(group) or []:
+            parts = [p.strip() for p in raw.split(",")]
+            if len(parts) < 7:
+                continue
+            seat_no, _row, _col, seat_type, avail, gender, fare = parts[:7]
+            try:
+                fare = float(fare)
+            except ValueError:
+                continue
+            seats.append({
+                "seat_no": seat_no,
+                "seat_type": "sleeper" if seat_type.upper() in ("LB", "UB") else "seater",
+                "available": avail.upper() == "Y",
+                "gender": {"M": "male", "F": "female"}.get(gender.upper()),
+                "fare": fare,
+            })
+    return seats
+
+
+def get_seat_layout(session, src_id, dst_id, jdate, service_id, operator_id):
+    """One bus's real per-seat data, or None if unreachable/unparseable.
+    See module docstring for the request shape and field mapping."""
+    payload = {
+        "sourceid": str(src_id), "destinationid": str(dst_id), "jdate": jdate,
+        "serviceKey": str(service_id), "operatorId": str(operator_id),
+        "prd": "mobile", "isReturnJourney": "0", "version": "58", "clevertapID": "",
+    }
+    headers = dict(_HEADERS, **{"content-type": "application/json",
+                                "x-app-name": "nextgenmweb",
+                                "accept": "application/json, text/plain, */*",
+                                "referer": BASE + "/seat-layout-web/"})
+    try:
+        r = session.post(SEAT_LAYOUT_URL, json=payload, headers=headers, timeout=20)
+    except requests.RequestException as e:
+        print("abhibus seat layout unreachable: %s" % e)
+        return None
+    if r.status_code != 200:
+        print("abhibus seat layout HTTP %s" % r.status_code)
+        return None
+    try:
+        return _parse_seats(r.json())
+    except ValueError:
+        return None
+
+
+def _cheapest_matching_seat(seats, gender, seat_type):
+    candidates = [s for s in seats if s["available"]
+                 and (not gender or s["gender"] == gender)
+                 and (not seat_type or s["seat_type"] == seat_type)]
+    return min(candidates, key=lambda s: s["fare"]) if candidates else None
+
+
+def search(from_city, to_city, date_code, ac=None, seat_type=None, gender=None):
     """(from_city, to_city, "YYYYMMDD") -> list[Hit] | None.
 
     Hit = {"operator", "price", "seat_type", "depart", "arrive", "seats_left",
@@ -185,13 +290,16 @@ def search(from_city, to_city, date_code):
         print("abhibus: non-JSON response, layout may have changed")
         return None
 
-    hits = []
+    prelim = []
     for svc in data.get("services", []):
         fare = (svc.get("fares") or {}).get("fare")
         if fare is None:
             continue
+        if not _matches_ac(svc.get("busTypeName"), ac):
+            continue        # whole-bus property, free to filter here
+
         timings = svc.get("timings") or {}
-        seats = svc.get("seatStats") or {}
+        seat_stats = svc.get("seatStats") or {}
         dep_ts = timings.get("startTimestamp")
         dep_date = dt.datetime.fromtimestamp(dep_ts, IST).date() if dep_ts else None
 
@@ -208,16 +316,46 @@ def search(from_city, to_city, date_code):
                        "&serviceKey=%s&operatorId=%s&prd=mobile"
                        % (BASE, src_id, dst_id, jdate, service_id, operator_id))
 
-        hits.append({
+        prelim.append({
             "operator": svc.get("travelerAgentName") or "?",
             "price": fare,
             "seat_type": svc.get("busTypeName") or "seat",
             "depart": timings.get("startTime") or "?",
             "arrive": _fmt_arrival(timings.get("arriveTime"),
                                    timings.get("arriveTimestamp"), dep_date),
-            "seats_left": seats.get("availableSeats"),
+            "seats_left": seat_stats.get("availableSeats"),
             "source": "abhibus",
             "book_url": referer,       # the search results page - always works
             "seat_url": seat_url,      # direct to this bus's seats - best-effort
+            "_service_id": service_id,
+            "_operator_id": operator_id,
         })
-    return hits
+
+    if not (gender or seat_type):
+        for h in prelim:
+            h.pop("_service_id", None)
+            h.pop("_operator_id", None)
+        return prelim
+
+    # Gender/seat-type need the real per-seat data (a bus's advertised price
+    # is the minimum across every seat, not a specific gender/type - see
+    # module docstring). Bounded to the cheapest MAX_SEAT_CHECKS candidates:
+    # a busy route can return 100+ buses, and checking all of them every scan
+    # would be real abuse, not just slow - this project already got
+    # rate-limited once from testing this same endpoint too fast.
+    prelim.sort(key=lambda h: h["price"])
+    refined = []
+    for h in prelim[:MAX_SEAT_CHECKS]:
+        sid, oid = h.pop("_service_id", None), h.pop("_operator_id", None)
+        if not (sid and oid):
+            continue
+        seat_layout = get_seat_layout(session, src_id, dst_id, jdate, sid, oid)
+        if not seat_layout:
+            continue
+        best = _cheapest_matching_seat(seat_layout, gender, seat_type)
+        if best:
+            h = dict(h)
+            h["price"] = best["fare"]
+            h["seat_no"] = best["seat_no"]
+            refined.append(h)
+    return refined

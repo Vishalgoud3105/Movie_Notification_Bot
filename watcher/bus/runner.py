@@ -41,6 +41,14 @@ def run_cycle_bus(state):
     simplification, the shift report stays a rough proof-of-life signal, not
     a full per-route breakdown (status/cancel already list every route by
     name, see messages.status_text()).
+
+    Each hit is tagged with the watch id it came from ("_watch_id"). Between
+    scheduled scans, "status" reuses whatever this function last returned -
+    without the tag, cancelling a route and starting a new one on a
+    different date would show the OLD route's leftover fares as if they
+    belonged to the new watch until the next scan overwrote them.
+    status_text() filters to only currently-active watch ids for exactly
+    this reason.
     """
     specs = watchspec.load_all()
     tally = maybe_report_shift(state, watching=bool(specs))
@@ -58,7 +66,11 @@ def run_cycle_bus(state):
                   % (spec["from_city"], spec["to_city"]))
             continue
 
-        hits, broken = sources.scan(spec["from_city"], spec["to_city"], spec["date"])
+        hits, broken = sources.scan(spec["from_city"], spec["to_city"], spec["date"],
+                                    ac=spec.get("ac"), seat_type=spec.get("seat_type"),
+                                    gender=spec.get("gender"))
+        for h in hits:
+            h["_watch_id"] = spec["id"]
         all_hits += hits
         all_broken += broken
 
