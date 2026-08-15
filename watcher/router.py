@@ -40,11 +40,17 @@ def _mentions(name, low):
     return name == "bus" and bool(ROUTE_PATTERN.search(low))
 
 
-def classify(text):
+def classify(text, chat_id=None):
     """Every domain this message is actually about - usually one, more than
     one if it explicitly names several (e.g. "watch movie X and also watch
     bus from A to B"), so nothing gets silently dropped from a combined
     request the way a single-winner keyword match would.
+
+    `chat_id` scopes the ambiguous-routing fallback below to THIS chat's own
+    watches - without it, a bare "status" typed in the owner's DM could route
+    to bus just because some unrelated group has a bus watch active, even
+    though the owner has none, the same cross-chat leak class as the
+    watchspec-level chat_id fix (see watcher/bus/watchspec.py's docstring).
     """
     low = (text or "").lower()
     named = [name for name in DOMAINS if _mentions(name, low)]
@@ -52,13 +58,15 @@ def classify(text):
         return named
 
     # Nothing named explicitly (e.g. bare "status"/"cancel") - route to
-    # whichever domain actually has a live watch, so generic wording still
-    # lands somewhere sensible without saying "movie"/"bus" every time.
-    active = [name for name, dom in DOMAINS.items() if dom["watchspec"].load()]
+    # whichever domain actually has a live watch IN THIS CHAT, so generic
+    # wording still lands somewhere sensible without saying "movie"/"bus"
+    # every time.
+    active = [name for name, dom in DOMAINS.items() if dom["watchspec"].load_all(chat_id)]
     if len(active) == 1:
         return active
 
-    # Still unclear (several or none active) - one cheap classification call.
+    # Still unclear (several or none active in this chat) - one cheap
+    # classification call.
     guess = llm.classify_domain(text) if llm.available() else None
     return [guess] if guess in DOMAINS else ["movie"]   # movie is the oldest, most familiar default
 
@@ -68,7 +76,7 @@ def answer(chat_id, cmd, ctx_by_domain):
 
     ctx_by_domain: {"movie": (hits, broken, bookable, tally), "bus": (hits, broken)}
     """
-    for name in classify(cmd):
+    for name in classify(cmd, chat_id):
         dom = DOMAINS.get(name)
         if dom:
             dom["runner"].answer(chat_id, cmd, *ctx_by_domain[name])

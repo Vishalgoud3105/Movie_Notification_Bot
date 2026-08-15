@@ -18,8 +18,9 @@ from ..telegram import poll_commands, reply_to, send_telegram, wants_report
 
 def answer(chat_id, cmd, hits, broken, bookable, tally=None):
     """Reply to one chat message about the movie watch(es) - to `chat_id`
-    only, never broadcast (an alert/shift report is a different, proactive
-    path that still uses send_telegram() to reach every known chat).
+    only, never broadcast. A show-open alert is likewise scoped to whichever
+    chat started that watch (see _send_to_owning_chat()); only the shift
+    report still broadcasts to every known chat.
 
     Tries the brain (LLM + watch handling) first, but any failure there must
     still leave you with a working status command, so it falls through to the
@@ -28,7 +29,7 @@ def answer(chat_id, cmd, hits, broken, bookable, tally=None):
     print("command from you: %s" % cmd)
     try:
         from .brain import handle
-        reply = handle(cmd, hits, broken, bookable, tally)
+        reply = handle(cmd, chat_id, hits, broken, bookable, tally)
         if reply:
             reply_to(chat_id, reply)
             return
@@ -36,7 +37,7 @@ def answer(chat_id, cmd, hits, broken, bookable, tally=None):
         print("brain failed, falling back to keywords: %s: %s" % (type(e).__name__, e))
 
     if wants_report(cmd):
-        reply_to(chat_id, live_report(hits, broken, bookable,
+        reply_to(chat_id, live_report(hits, broken, bookable, chat_id,
                                       checks=(tally or {}).get("checks", 1)))
     else:
         reply_to(chat_id, "\n".join([
@@ -49,6 +50,21 @@ def answer(chat_id, cmd, hits, broken, bookable, tally=None):
             "",
             "You'll also get a report at the end of each shift,",
             "and one 🚨 alert the moment what you're watching opens."]))
+
+
+def _send_to_owning_chat(spec, text):
+    """A show-open alert reaches only the chat that started this watch -
+    never every chat the bot is in. Mirrors watcher/bus/runner.py's identical
+    helper and the same reported bug: watching a movie from the owner's DM
+    was alerting into every group too, because alerts went through
+    send_telegram() (broadcast) unconditionally. Falls back to a broadcast
+    only for a watch persisted before chat scoping existed (no "chat_id"
+    field at all) so an already-running pre-migration watch doesn't go
+    silent."""
+    chat_id = spec.get("chat_id")
+    if chat_id is not None:
+        return reply_to(chat_id, text)
+    return send_telegram(text)
 
 
 def boot():
@@ -137,7 +153,7 @@ def run_cycle(state, session, jitter=False):
             by_date = {}
             for date_code, show in fresh:
                 by_date.setdefault(date_code, []).append(show)
-            delivered = send_telegram(alert_text(by_date))
+            delivered = _send_to_owning_chat(spec, alert_text(by_date))
             if not delivered:
                 print("ALERT NOT DELIVERED for %s - not marking these shows as "
                       "seen, so the next cycle tries again" % spec.get("title"))
@@ -154,8 +170,8 @@ def run_cycle(state, session, jitter=False):
         # out, so release JUST this watch and keep scanning the rest.
         if delivered and fresh and all(hits.get(d) for d in DATES):
             watchspec.finish(wid, "found")
-            send_telegram("✅ %s - that's everything I was watching for! Alert "
-                          "sent above. Tell me what's next." % spec.get("title"))
+            _send_to_owning_chat(spec, "✅ %s - that's everything I was watching for! "
+                                 "Alert sent above. Tell me what's next." % spec.get("title"))
 
     state["seen"] = sorted(seen)
     state["shift"] = tally

@@ -35,6 +35,15 @@ TIME_TO = os.environ.get("TIME_TO", "20:00")
 VENUES = [v.strip().lower() for v in os.environ.get("VENUES", "").split(",") if v.strip()]
 
 
+# A seat-category name to match against a session's own area labels
+# (district.py's "areas" field - e.g. "CLASSIC ROWS"/"PRIME ROWS"/"RECLINER
+# ROWS" for one cinema, "SILVER"/"GOLD"/"PLATINUM" for another). Free text,
+# not a fixed enum - every cinema chain names its own tiers, so this is
+# matched as a substring at report time rather than validated against a set
+# list. Blank = any category.
+SEAT_CATEGORY = os.environ.get("SEAT_CATEGORY", "").strip().lower()
+
+
 # "4DX 3D" is its own child event (ET00502630 here) and is NOT the same as plain
 # 4DX or 4DX 2D. Matched against the child-event dimension and the venue's show
 # Attributes, with punctuation stripped so "4DX 3D"/"4DX-3D"/"4DX3D" all hit and

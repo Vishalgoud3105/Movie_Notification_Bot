@@ -24,6 +24,7 @@ Return exactly this shape, using null for anything the user did not say:
   "venues": ["<cinema or venue name fragment>", ...],
   "time_from": "HH:MM",
   "time_to": "HH:MM",
+  "seat_category": "<seat tier the user asked for, e.g. recliner, gold, prime, platinum>",
   "missing": ["<field names you could not fill that are needed>"]
 }
 
@@ -37,6 +38,11 @@ Rules:
   morning 06:00-12:00, afternoon 12:00-17:00, evening 17:00-21:00,
   night 21:00-23:59, "morning to evening" 06:00-20:00.
 - For "venues", give the distinctive part only: "PVR Irrum Manzil" -> "Irrum Manzil".
+- seat_category is optional - leave null (any tier) unless the user names one.
+  Every cinema names its own seat tiers differently (recliner/gold/platinum/
+  classic/prime/...), so just pass through whatever word they used, lowercase -
+  do not normalize it to some fixed list, and do not guess one from a format
+  like "4DX" (that's a screen format, not a seat tier).
 - Never invent a title, city or date the user did not give. Use null and list
   the field in "missing".
 - Output raw JSON. No prose, no markdown fences.

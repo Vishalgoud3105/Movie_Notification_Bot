@@ -51,9 +51,22 @@ def _save(watches):
     os.replace(tmp, WATCH_FILE)      # atomic, same reason as seen.json
 
 
-def load_all():
-    """Every movie being watched right now."""
-    return [w for w in _load_raw() if isinstance(w, dict) and w.get("active")]
+def load_all(chat_id=None):
+    """Every movie being watched right now - across every chat, unless
+    `chat_id` is given, in which case only that chat's own watches (plus any
+    legacy watch from before chat scoping existed, which has no chat_id at
+    all - treated as visible from anywhere until it's cancelled/replaced,
+    same migration grace period as watcher/bus/watchspec.py).
+
+    A watch started in the owner's DM must never show up, alert into, or be
+    cancellable from a group the bot is also in, and vice versa - see
+    run_cycle()'s alert send and brain.py's cancel/status/modify handling,
+    all of which pass their chat_id through to this.
+    """
+    watches = [w for w in _load_raw() if isinstance(w, dict) and w.get("active")]
+    if chat_id is not None:
+        watches = [w for w in watches if w.get("chat_id") in (None, chat_id)]
+    return watches
 
 
 def load():
@@ -64,14 +77,15 @@ def load():
     return watches[0] if watches else None
 
 
-def find(title):
-    """Best-effort match of a spoken title against active watches - substring,
-    case-insensitive. Used to figure out which watch a message like "cancel
-    spiderman" refers to when several are active."""
+def find(chat_id, title):
+    """Best-effort match of a spoken title against `chat_id`'s own active
+    watches - substring, case-insensitive. Used to figure out which watch a
+    message like "cancel spiderman" refers to when several are active in the
+    same chat."""
     title = (title or "").strip().lower()
     if not title:
         return None
-    for w in load_all():
+    for w in load_all(chat_id):
         if title in (w.get("title") or "").lower():
             return w
     return None
@@ -88,6 +102,7 @@ def _push(values):
         mod.TIME_TO = values["time_to"]
         mod.DISTRICT_URL = values["url"]
         mod.MOVIE_NAME = values["title"]
+        mod.SEAT_CATEGORY = (values.get("seat_category") or "").strip().lower()
 
 
 def apply(spec):
@@ -111,10 +126,13 @@ def start(spec):
     return spec
 
 
-def finish(watch_id=None, reason="found"):
+def finish(watch_id=None, reason="found", chat_id=None):
     """Goal reached (or cancelled): stop watching one movie (by id) or every
-    active one (id=None). Deactivated rather than deleted, so the last watch
-    is still inspectable and the alert that ended it can be explained.
+    active one this chat can see (id=None) - scoped by `chat_id` the same way
+    load_all() is, so a bare "cancel" typed in a group can never sweep away
+    the owner's own DM watch or another group's. Deactivated rather than
+    deleted, so the last watch is still inspectable and the alert that ended
+    it can be explained.
 
     Always returns a LIST of the specs that were stopped (possibly empty),
     even for a single id - callers format "stopped watching: X" from a list
@@ -123,12 +141,17 @@ def finish(watch_id=None, reason="found"):
     watches = _load_raw()
     stopped = []
     for w in watches:
-        if w.get("active") and (watch_id is None or w.get("id") == watch_id):
-            w = dict(w)
-            w["active"] = False
-            w["ended"] = dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M")
-            w["ended_reason"] = reason
-            stopped.append(w)
+        if not w.get("active"):
+            continue
+        if watch_id is not None and w.get("id") != watch_id:
+            continue
+        if chat_id is not None and w.get("chat_id") not in (None, chat_id):
+            continue
+        w = dict(w)
+        w["active"] = False
+        w["ended"] = dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M")
+        w["ended_reason"] = reason
+        stopped.append(w)
     stopped_ids = {w["id"] for w in stopped}
     _save([w for w in watches if w.get("id") not in stopped_ids] + stopped)
     for w in stopped:
@@ -152,9 +175,11 @@ def _forget_seen(watch_id):
     save_state(state)
 
 
-def describe():
-    """Facts block for the LLM prompts - only things actually known."""
-    watches = load_all()
+def describe(chat_id=None):
+    """Facts block for the LLM prompts - only things actually known, and only
+    this chat's own watches when chat_id is given (onboarding.py calls this
+    unscoped, before any chat-specific context exists)."""
+    watches = load_all(chat_id)
     lines = []
     if watches:
         for w in watches:

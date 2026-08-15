@@ -10,6 +10,21 @@ District is also a better source than BMS was:
   - a requested date is echoed back as `searchDate`, so an unopened date cannot
     silently masquerade as today's shows the way it does on BMS
   - sessions carry real seat counts (`avail` / `total`), not just a sold-out flag
+  - each session's own "areas" list carries real per-seat-category data (a
+    label like "PRIME ROWS"/"RECLINER ROWS" - naming is cinema-specific, not
+    a fixed tier set - plus price and live availability per category) -
+    added 15 Aug 2026 after live-checking a real session object; this was
+    always in the page's own __NEXT_DATA__, just never extracted before, so
+    every alert reported no price at all ("not exposed per session on this
+    page" was wrong - it's right there). See _cheapest_area() and
+    SEAT_CATEGORY in config.py for how this feeds an optional category filter.
+  - a session's own sid/pid/cid/mid fields (sessionId/providerId/cinemaId/
+    moviecode) are exactly what District's own seat-select API
+    (gw/consumer/movies/v1/select-seat) needs for real per-seat data - not
+    used yet (areas already gives category-level price+availability for
+    free), but confirmed live 15 Aug 2026: that endpoint returns real seat
+    data with a *self-minted* x-guest-token (not server-validated), so a
+    genuine per-seat drill-down is a real option later if needed.
 
 The page is server-rendered: everything needed sits in the __NEXT_DATA__ blob.
 Note the page ALSO carries schema.org JSON-LD showtimes - do not parse those.
@@ -98,8 +113,26 @@ def show_dates(data):
     return []
 
 
+def _cheapest_area(areas, wanted_category):
+    """The area to report for one session: cheapest available area matching
+    `wanted_category` (a substring match against label/code, case-
+    insensitive), or cheapest available area overall when no category is
+    wanted. None if nothing available matches - callers must treat that as
+    "this session doesn't have what was asked for", not "free"/unpriced.
+    """
+    areas = areas or []
+    if wanted_category:
+        areas = [a for a in areas
+                 if wanted_category in (a.get("label") or "").lower()
+                 or wanted_category in (a.get("code") or "").lower()]
+    priced = [a for a in areas
+             if a.get("price") is not None and (a.get("sAvail") or 0) > 0]
+    return min(priced, key=lambda a: a["price"]) if priced else None
+
+
 def shows_for(data, date_code):
-    """[(key, show)] for sessions matching the format, language and time window.
+    """[(key, show)] for sessions matching the format, language, time window
+    and (when set) seat category.
 
     Empty until 4DX 3D is actually scheduled for that date. District echoes the
     date it searched, so a mismatch means the answer is about a different day
@@ -137,6 +170,16 @@ def shows_for(data, date_code):
             if not lo <= mins <= hi:
                 continue
 
+            # A session's own "areas" list carries real per-category price +
+            # live availability (see module docstring) - if a seat category
+            # was asked for and this session doesn't have one matching with
+            # actual seats free, it's not a match: reporting it "found"
+            # anyway would be a false-positive alert for a category that
+            # isn't actually bookable here.
+            area = _cheapest_area(s.get("areas"), SEAT_CATEGORY)
+            if SEAT_CATEGORY and not area:
+                continue
+
             avail = s.get("avail")
             out.append((
                 "|".join([date_code, venue, raw, fmt, str(s.get("audi", ""))]),
@@ -146,7 +189,8 @@ def shows_for(data, date_code):
                     "mins": mins,
                     "sold": avail == 0,
                     "format": fmt,
-                    "price": "",       # not exposed per session on this page
+                    "price": area["price"] if area else "",
+                    "seat_category": area.get("label") if area else None,
                     "seats": avail,
                 },
             ))

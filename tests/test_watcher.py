@@ -123,6 +123,7 @@ def demo():
 
     demo_district()
     demo_brain()
+    demo_movie_chat_scoping()
     demo_group_chats()
 
     # blank filters = report everything. Explicitly reset every field
@@ -273,6 +274,53 @@ def demo_district():
     # a page with no __NEXT_DATA__ shape at all must be empty, not an exception
     assert district.shows_for({}, "20260808") == []
 
+    # seat-category price/filtering - real field shapes from a live-captured
+    # session object (sid/pid/cid/mid/areas), 15 Aug 2026
+    real_areas = [
+        {"code": "CR", "label": "CLASSIC ROWS", "price": 140, "sAvail": 82},
+        {"code": "QR", "label": "PRIME ROWS", "price": 185, "sAvail": 71},
+        {"code": "BR", "label": "RECLINER ROWS", "price": 285, "sAvail": 5},
+    ]
+    sold_out_recliner = [
+        {"code": "CR", "label": "CLASSIC ROWS", "price": 140, "sAvail": 40},
+        {"code": "BR", "label": "RECLINER ROWS", "price": 285, "sAvail": 0},
+    ]
+    no_prime_at_all = [{"code": "CR", "label": "CLASSIC ROWS", "price": 140, "sAvail": 20}]
+
+    assert district._cheapest_area(real_areas, "") == real_areas[0], \
+        "no filter -> cheapest available area overall (CLASSIC ROWS, 140)"
+    assert district._cheapest_area(real_areas, "prime")["price"] == 185
+    assert district._cheapest_area(real_areas, "recliner")["price"] == 285
+    assert district._cheapest_area(sold_out_recliner, "recliner") is None, \
+        "a matching category with zero seats available must not count as a match"
+    assert district._cheapest_area(no_prime_at_all, "prime") is None, \
+        "no area matches the wanted category at all"
+
+    try:
+        # no filter: price now comes through for real (used to always be "")
+        district.SEAT_CATEGORY = ""
+        got = district.shows_for(page("2026-08-08", [
+            {"showTime": "2026-08-08T04:40", "scrnFmt": "4DX-3D", "avail": 2,
+             "audi": "AUDI 01 4DX", "areas": real_areas},
+        ]), "20260808")
+        assert len(got) == 1 and got[0][1]["price"] == 140, got
+
+        # filtered: only the session with a real, available PRIME ROWS match
+        # survives; the price/seat_category shown are for THAT category, not
+        # the cheapest overall
+        district.SEAT_CATEGORY = "prime"
+        got = district.shows_for(page("2026-08-08", [
+            {"showTime": "2026-08-08T04:40", "scrnFmt": "4DX-3D", "avail": 2,
+             "audi": "AUDI 01 4DX", "areas": real_areas},
+            {"showTime": "2026-08-08T05:30", "scrnFmt": "4DX-3D", "avail": 9,
+             "audi": "AUDI 02 4DX", "areas": no_prime_at_all},
+        ]), "20260808")
+        assert len(got) == 1, \
+            "the session with no PRIME ROWS at all must be filtered out: %r" % (got,)
+        assert got[0][1]["price"] == 185 and got[0][1]["seat_category"] == "PRIME ROWS", got
+    finally:
+        district.SEAT_CATEGORY = ""
+
 
 if __name__ == "__main__":
     demo()
@@ -284,35 +332,37 @@ def demo_brain():
     from watcher import llm
     from watcher.movies import brain, search, watchspec
 
+    chat_id = 999
+
     # keyword commands must work with the LLM completely unavailable
     real_available, llm.available = llm.available, lambda: False
-    reply = brain.handle("tell me a joke", {}, [], None)
+    reply = brain.handle("tell me a joke", chat_id, {}, [], None)
     assert "keywords" in reply.lower(), reply
     assert "report" in reply.lower(), reply
     # ...and a status request must never reach the LLM at all - either a real
     # shift report (📋, an active watch) or the idle message (😴, none right
     # now) is a valid deterministic answer; what must never happen is falling
     # through to the model, which llm.available()==False would catch anyway.
-    reply = brain.handle("status", {"20260808": []}, [], "20260813")
+    reply = brain.handle("status", chat_id, {"20260808": []}, [], "20260813")
     assert reply.startswith("📋") or reply.startswith("😴"), \
         "status must be answered from data, not the model: %r" % reply
 
     # a title that does not exist is refused, never turned into a dead URL
     real_find, search.find = search.find, lambda *a, **k: None
     assert "couldn't find" in brain._apply_new_watch(
-        {"title": "a film that does not exist", "dates": ["2026-08-08"]}).lower()
+        {"title": "a film that does not exist", "dates": ["2026-08-08"]}, chat_id).lower()
 
     # live events are declined honestly rather than half-supported
     assert search.looks_like_event("Coldplay concert")
     assert search.looks_like_event("India vs Australia cricket match")
     assert not search.looks_like_event("Spider-Man: Brand New Day")
     assert "live event" in brain._apply_new_watch(
-        {"title": "Coldplay concert", "dates": ["2026-08-08"]}).lower()
+        {"title": "Coldplay concert", "dates": ["2026-08-08"]}, chat_id).lower()
 
     # found, but no dates given -> ask, do not guess
     search.find = lambda *a, **k: {"title": "Some Film", "url": "https://x/y",
                                    "city": "hyderabad", "movie_id": "1", "cities": []}
-    assert "which dates" in brain._apply_new_watch({"title": "Some Film"}).lower()
+    assert "which dates" in brain._apply_new_watch({"title": "Some Film"}, chat_id).lower()
 
     # full lifecycle: start a watch, apply it, finish it - and a second,
     # independent watch alongside it (multi-watch, not just one-at-a-time)
@@ -324,7 +374,7 @@ def demo_brain():
     try:
         msg = brain._apply_new_watch({
             "title": "Some Film", "dates": ["2026-08-08"], "format": "IMAX",
-            "venues": ["Forum"], "time_from": "10:00", "time_to": "22:00"})
+            "venues": ["Forum"], "time_from": "10:00", "time_to": "22:00"}, chat_id)
         assert "Watching" in msg, msg
         active = watchspec.load_all()
         assert len(active) == 1 and active[0]["active"] and active[0]["format"] == "IMAX", active
@@ -340,7 +390,7 @@ def demo_brain():
         # a second, independent movie can be watched at the same time
         msg2 = brain._apply_new_watch({
             "title": "Some Film", "dates": ["2026-08-09"], "format": "2D",
-            "venues": [], "time_from": "00:00", "time_to": "23:59"})
+            "venues": [], "time_from": "00:00", "time_to": "23:59"}, chat_id)
         assert "Watching" in msg2, msg2
         assert len(watchspec.load_all()) == 2, watchspec.load_all()
 
@@ -348,7 +398,7 @@ def demo_brain():
         # than creating a wasteful third, duplicate entry
         brain._apply_new_watch({
             "title": "Some Film", "dates": ["2026-08-08"], "format": "IMAX",
-            "venues": ["Forum"], "time_from": "10:00", "time_to": "22:00"})
+            "venues": ["Forum"], "time_from": "10:00", "time_to": "22:00"}, chat_id)
         assert len(watchspec.load_all()) == 2, "must dedup against an identical watch"
 
         # simulate a restart: globals get wiped, re-applying the reloaded spec
@@ -375,3 +425,57 @@ def demo_brain():
                 os.remove(f)
         watchspec.WATCH_FILE, sm.STATE_FILE = keep_watch, keep_state
         search.find, llm.available = real_find, real_available
+
+
+def demo_movie_chat_scoping():
+    """A movie watch belongs to the chat that created it - same reported bug
+    and same fix as watcher/bus: (1) an alert must reach only the owning
+    chat, (2) status/facts must only see this chat's own watches, (3) cancel
+    must never touch another chat's watch."""
+    import tempfile
+    from watcher.movies import brain, runner, watchspec
+
+    OWNER, GROUP = 100, -500
+    keep_watch = watchspec.WATCH_FILE
+    watchspec.WATCH_FILE = os.path.join(tempfile.gettempdir(), "_movie_chat_scope_test.json")
+    sent = []
+    real_reply_to, runner.reply_to = runner.reply_to, lambda c, t: sent.append((c, t))
+    real_send, runner.send_telegram = runner.send_telegram, lambda t: sent.append((None, t))
+
+    try:
+        owner_watch = watchspec.start({"title": "Owner Movie", "dates": ["2026-08-20"],
+                                       "chat_id": OWNER})
+        group_watch = watchspec.start({"title": "Group Movie", "dates": ["2026-08-21"],
+                                       "chat_id": GROUP})
+
+        # (2) status: each chat sees only its own watch
+        assert [w["id"] for w in watchspec.load_all(OWNER)] == [owner_watch["id"]]
+        assert [w["id"] for w in watchspec.load_all(GROUP)] == [group_watch["id"]]
+
+        # (1) alert: _send_to_owning_chat() must route to the watch's own chat,
+        # never broadcast - this was the actual reported leak
+        runner._send_to_owning_chat(owner_watch, "owner alert text")
+        runner._send_to_owning_chat(group_watch, "group alert text")
+        assert (OWNER, "owner alert text") in sent, sent
+        assert (GROUP, "group alert text") in sent, sent
+        assert not any(c is None for c, _ in sent), \
+            "a chat-tagged watch's alert must never broadcast: %r" % sent
+
+        # a legacy watch (no chat_id at all) must still fall back to broadcast,
+        # so an already-running pre-migration watch doesn't go silent
+        sent.clear()
+        runner._send_to_owning_chat({"title": "Legacy"}, "legacy alert text")
+        assert sent == [(None, "legacy alert text")], sent
+
+        # (3) cancel: a bare "cancel" from the owner must not touch the group's watch
+        reply = brain.handle("cancel", OWNER, {}, [], None)
+        assert "Stopped watching" in reply, reply
+        assert watchspec.load_all(OWNER) == [], "owner's own watch must be gone"
+        assert [w["id"] for w in watchspec.load_all(GROUP)] == [group_watch["id"]], \
+            "the group's watch must survive the owner cancelling their own"
+    finally:
+        if os.path.exists(watchspec.WATCH_FILE):
+            os.remove(watchspec.WATCH_FILE)
+        watchspec.WATCH_FILE = keep_watch
+        runner.reply_to = real_reply_to
+        runner.send_telegram = real_send

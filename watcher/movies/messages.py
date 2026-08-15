@@ -50,6 +50,8 @@ def pretty_spec(spec):
             bits.append(prefix + str(spec[key]).title() if prefix else str(spec[key]))
     if spec.get("venues"):
         bits.append("at " + ", ".join(v.title() for v in spec["venues"]))
+    if spec.get("seat_category"):
+        bits.append("%s seats" % str(spec["seat_category"]).title())
     if spec.get("dates"):
         bits.append("on " + ", ".join(spec["dates"]))
     if spec.get("time_from"):
@@ -81,12 +83,32 @@ def format_days(by_date):
             if prices:
                 lines.append("     💰 from ₹%s"
                              % min(prices, key=lambda p: float(p or 0)).split(".")[0])
-        if SOURCE == "district":
-            lines.append("  🔗 %s?fromdate=%s-%s-%s"
-                         % (DISTRICT_URL, date_code[:4], date_code[4:6], date_code[6:8]))
-        else:
-            lines.append("  🔗 https://in.bookmyshow.com/movies/%s/buytickets/%s/%s"
-                         % (MOVIE_SLUG, EVENT_CODE, date_code))
+            if SEAT_CATEGORY:
+                # a category was specifically asked for - name which tier
+                # actually matched, not just the price, since "from ₹X" alone
+                # doesn't confirm it's the requested seat type
+                categories = sorted({s["seat_category"] for s in available
+                                     if s.get("seat_category")})
+                if categories:
+                    lines.append("     🎟️ %s" % ", ".join(categories))
+        # Both platforms, BMS first - tickets are confirmed available (this
+        # alert only fires once real matching shows are found), so give the
+        # option of either site rather than locking to whichever one is
+        # configured as SOURCE. District's link is exact: DISTRICT_URL is
+        # this specific watch's own URL (watchspec.apply() pushes it fresh
+        # per spec every cycle - see watchspec.py). BMS has no equivalent -
+        # BOOKMYSHOW.MOVIE_SLUG/EVENT_CODE are only ever the single .env-
+        # configured default, never updated per watch (BMS 403s every
+        # datacenter IP, so there's no way to resolve a real per-movie BMS
+        # slug from this server the way District's title search does) - a
+        # specific-looking BMS link built from those would point at the
+        # WRONG movie for anything other than the default. Point at BMS's
+        # city movie listing instead: always a real, correct landing page,
+        # never a wrong specific one.
+        lines.append("  🔗 BMS: https://in.bookmyshow.com/explore/movies-%s"
+                     % (HOME_CITY or "hyderabad").lower())
+        lines.append("  🔗 District: %s?fromdate=%s-%s-%s"
+                     % (DISTRICT_URL, date_code[:4], date_code[4:6], date_code[6:8]))
     return lines
 
 
@@ -146,16 +168,16 @@ def shift_report(t):
     return "\n".join(lines)
 
 
-def live_report(hits, broken, bookable, checks=1):
+def live_report(hits, broken, bookable, chat_id=None, checks=1):
     """A shift report describing this very moment, from an already-done scan.
 
     `hits` is {watch_id: {date_code: [(key, show), ...]}} - see
     movies/runner.py::run_cycle(). Short-circuits when nothing is being
-    watched, rather than showing stale .env-configured field values as if
-    they were a live default watch.
+    watched IN THIS CHAT, rather than showing stale .env-configured field
+    values as if they were a live default watch, or another chat's watch.
     """
     from . import watchspec
-    watches = watchspec.load_all()
+    watches = watchspec.load_all(chat_id)
     if not watches:
         return ("😴 No movie is being watched right now. Tell me what to "
                 "watch, e.g. \"%s\"." % example_watch_phrase())
