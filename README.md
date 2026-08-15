@@ -15,11 +15,15 @@ anything; it only watches.
 
 - **Movies** (`watcher/movies/`) — District/BookMyShow showtimes. Live in
   production. Has a standing default watch (set via `.env`) as well as
-  chat-set ones.
+  chat-set ones. Multiple movies can be watched at once. Real per-category
+  seat pricing and an optional seat-category filter ("watch it in recliner
+  seats") come from District's own session data — see Filters below.
 - **Bus fares** (`watcher/bus/`) — AbhiBus cheapest price for a route+date,
-  chat-set only (no standing default). Real, working, verified from the
-  Oracle VM. RedBus was tried and dropped: confirmed IP-blocked from the VM
-  even with a proper cookie warm-up — see `watcher/bus/sources.py`.
+  chat-set only (no standing default). Multiple routes can be watched at
+  once. Government/state RTC operators are excluded and a minimum rating
+  bar is enforced before a bus counts as "cheapest" — see Filters below.
+  RedBus was tried and dropped: confirmed IP-blocked from the VM even with a
+  proper cookie warm-up — see `watcher/bus/sources.py`.
 
 Each domain is a self-contained sibling package with its own watch file, own
 state file, own message templates — not one shared `Source` interface, on
@@ -27,6 +31,39 @@ purpose: see `watcher/router.py`'s docstring for why. `watcher/router.py`
 classifies an incoming chat message (movie vs bus) so both domains can share
 one Telegram poll; `watcher/config.py`, `watcher/telegram.py` and
 `watcher/llm.py` are the generic infrastructure every domain reuses.
+
+### Multi-watch and chat isolation
+
+Several movies and several bus routes can be watched at once, each
+independent. A watch remembers which Telegram chat created it — alerts,
+`status`, and `cancel` are all scoped to that chat, so watching from your own
+DM never alerts into a group the bot is also in, and vice versa. A bare
+`cancel` with nothing named stops every watch *this chat* can see, never
+another chat's. (Watches created before this existed have no chat tag and
+stay visible from anywhere, as a one-time migration fallback.)
+
+### Filters
+
+**Bus (AbhiBus):** optional `ac` (`ac`/`non_ac`), `seat_type`
+(`sleeper`/`seater`), and `gender` (`male`/`female`) filters — "watch it,
+male seats only" reports the cheapest matching seat specifically, with a
+direct link to that bus's seat-selection page. Government/state RTC
+operators (TSRTC, KSRTC, etc.) never appear in results, and a bus must clear
+a minimum rating (3.5★, 5+ ratings) before it's ever reported as cheapest —
+an unrated bus doesn't pass by default.
+
+**Movies (District):** optional free-text seat-category filter — "watch it
+in recliner seats", "gold seats". Every cinema chain names its own tiers
+(CLASSIC ROWS/PRIME ROWS/RECLINER ROWS at one INOX, EXECUTIVE at another),
+so this matches as a substring rather than a fixed list. Alerts always show
+the real price per show now (District's session data carried this all
+along, just wasn't being read), and show both a BookMyShow and a District
+link — District's is exact for that watch; BMS's is a general city listing,
+since BMS blocks every request from this project's server and there's no way
+to resolve a real per-movie BMS page from it (a true tap-to-book seat link,
+the way bus has, was investigated for both platforms and isn't achievable
+automatically — District's seat page is session-bound, BMS's would need
+codes this server can't fetch).
 
 ## Two things that make it trustworthy
 
@@ -210,7 +247,13 @@ Every value has a default in code; `.env` only overrides.
 | `TIME_FROM` / `TIME_TO` | show start window, IST |
 | `FORMAT` / `LANGUAGE` | punctuation-insensitive, so `4DX 3D` matches `4DX-3D` |
 | `VENUES` | substring match; blank = every cinema |
+| `SEAT_CATEGORY` | free-text seat tier, e.g. `recliner`; blank = any |
 | `SCAN_EVERY` / `LONG_POLL` | `--serve` only: 600 s and 25 s |
+
+These are only the *default* env-configured movie watch. Bus has no env
+defaults — every bus watch is chat-set (`ac`/`seat_type`/`gender` filters
+included), and movie watches set via chat carry their own filters
+independent of these `.env` values too.
 
 ## Disclaimer
 
