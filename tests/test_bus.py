@@ -32,6 +32,8 @@ def demo():
         _demo_router()
         _demo_refuse_unresolvable()
         _demo_seat_filtering()
+        _demo_quality_and_govt_filter()
+        _demo_chat_scoping()
     finally:
         if os.path.exists(watchspec.WATCH_FILE):
             os.remove(watchspec.WATCH_FILE)
@@ -88,7 +90,7 @@ def _demo_multi_watch():
     assert len(watchspec.load_all()) == 2, watchspec.load_all()
 
     # find() matches a named route among several active ones
-    match = watchspec.find(to_city="bangalore")
+    match = watchspec.find(None, to_city="bangalore")
     assert match and match["id"] == r1["id"], match
 
     # finishing one by id must not touch the other
@@ -162,11 +164,11 @@ def _demo_stale_status():
     cancelled/changed since the last scan - reported live: watch the 16th,
     cancel it, watch the 14th instead, then ask "status" before the next
     scheduled scan runs - it showed the 16th's old fare as if it were the
-    14th's. run_cycle_bus() tags each hit with its watch id; status_text()
-    must filter to only currently-active ids.
+    14th's. run_cycle_bus() tags each hit with its watch id; live_report()
+    must group hits by that tag rather than pooling everything together.
     """
     from watcher.bus import sources
-    from watcher.bus.messages import status_text
+    from watcher.bus.messages import live_report
 
     state = {"shift": None}
     real_scan = sources.scan
@@ -175,7 +177,8 @@ def _demo_stale_status():
         route16 = watchspec.start({"from_city": "hyderabad", "to_city": "nellore",
                                    "date": "20260816", "target_price": None})
         sources.scan = lambda *a, **k: ([{"operator": "Old Route Bus", "price": 999,
-                                          "seat_type": "seater", "source": "abhibus"}], [])
+                                          "seat_type": "seater", "source": "abhibus",
+                                          "rating": 4.5, "no_of_ratings": 30}], [])
         hits, broken = bus_runner.run_cycle_bus(state)
         assert any(h.get("_watch_id") == route16["id"] for h in hits), hits
 
@@ -186,11 +189,11 @@ def _demo_stale_status():
         watchspec.start({"from_city": "hyderabad", "to_city": "nellore",
                          "date": "20260814", "target_price": None})
 
-        reply = status_text(watchspec.load_all(), hits, broken)
+        reply = live_report(watchspec.load_all(), hits, broken)
         assert "999" not in reply, \
             "must not show the cancelled route's stale fare: %r" % reply
         assert "Old Route Bus" not in reply, reply
-        assert "checking soon" in reply.lower(), reply
+        assert "no fares found yet" in reply.lower(), reply
     finally:
         sources.scan = real_scan
         watchspec.finish(None, "cancelled")
@@ -209,14 +212,25 @@ def _demo_shift_report():
 
     watching = shift_report({"name": "Night", "date": "20260801", "checks": 12,
                              "first": "9:02 PM", "last": "11:54 PM", "errors": 0,
-                             "route": "Hyderabad -> Bangalore · on Thursday, 20 Aug",
-                             "lowest": 700})
+                             "routes": {"abc123": {
+                                 "route": "Hyderabad -> Bangalore · on Thursday, 20 Aug",
+                                 "lowest": 700}}})
     assert watching.startswith("🚌 NIGHT SHIFT"), watching
     assert "700" in watching and "Bangalore" in watching, watching
 
+    # several routes active during the same shift must each get their own
+    # line, not just whichever was processed last (the old single-route bug)
+    multi = shift_report({"name": "Night", "date": "20260801", "checks": 20,
+                          "first": "9:00 PM", "last": "11:50 PM", "errors": 0,
+                          "routes": {
+                              "a": {"route": "Hyderabad -> Bangalore · on Thu, 20 Aug", "lowest": 700},
+                              "b": {"route": "Hyderabad -> Nellore · on Fri, 21 Aug", "lowest": None},
+                          }})
+    assert "Bangalore" in multi and "Nellore" in multi, multi
+    assert "700" in multi and "No fares found yet" in multi, multi
+
     idle = shift_report({"name": "Morning", "date": "20260801", "checks": 0,
-                         "first": None, "last": None, "errors": 0,
-                         "route": None, "lowest": None})
+                         "first": None, "last": None, "errors": 0, "routes": {}})
     assert "No bus route being watched" in idle, idle
 
     # a tally for a shift that has ended (name/date mismatch) must be sent once
@@ -230,7 +244,7 @@ def _demo_shift_report():
         # not silently dropped just because nothing is being watched anymore
         state = {"shift": {"name": "Night", "date": "19990101", "checks": 3,
                            "first": "1:00 AM", "last": "1:30 AM", "errors": 0,
-                           "route": None, "lowest": None}}
+                           "routes": {}}}
         maybe_report_shift(state, watching=False)
         assert len(sent) == 1 and sent[0].startswith("🚌 NIGHT SHIFT"), sent
         assert state["shift"] is None, "a flushed tally must be cleared"
@@ -239,8 +253,30 @@ def _demo_shift_report():
         # (that would just spam an empty report at the next boundary forever)
         maybe_report_shift(state, watching=False)
         assert state["shift"] is None, "must not open a tally with nothing watched"
+
+        # bug fix: a route cancelled mid-shift must not still appear in the
+        # report sent at the end of that shift - reported live: cancel a bus
+        # watch, and the next shift report kept listing it anyway.
+        sent.clear()
+        r1 = watchspec.start({"from_city": "hyderabad", "to_city": "bangalore",
+                              "date": "20260820", "target_price": None})
+        r2 = watchspec.start({"from_city": "chennai", "to_city": "pune",
+                              "date": "20260821", "target_price": None})
+        state = {"shift": {"name": "Night", "date": "19990101", "checks": 5,
+                           "first": "9:00 PM", "last": "9:30 PM", "errors": 0,
+                           "routes": {
+                               r1["id"]: {"route": "Hyderabad -> Bangalore", "lowest": 700},
+                               r2["id"]: {"route": "Chennai -> Pune", "lowest": 500},
+                           }}}
+        watchspec.finish(r1["id"], "cancelled")
+        maybe_report_shift(state, watching=True)
+        assert len(sent) == 1, sent
+        assert "Bangalore" not in sent[0], \
+            "a cancelled route must not appear in the shift report: %r" % sent[0]
+        assert "Pune" in sent[0], "the still-active route must still be reported"
     finally:
         bus_shifts.send_telegram = real_send
+        watchspec.finish(None, "cancelled")
 
 
 def _demo_router():
@@ -275,8 +311,21 @@ def _demo_router():
         assert router.classify("cancel") == ["bus"]
         watchspec.finish(None, "cancelled")
 
-        # neither active, Groq unreachable in this offline test -> falls back to movie
+        # bug fix: a chat-tagged watch owned by chat 999 must not make an
+        # UNRELATED chat's bare "status" route to bus - ambiguous routing is
+        # chat-scoped the same way the watch data itself is. Neither domain
+        # active for chat 42 -> falls through to the Groq-unavailable default.
         from watcher import llm
+        real_available, llm.available = llm.available, lambda: False
+        watchspec.start({"from_city": "c", "to_city": "d", "date": "20260820",
+                         "target_price": None, "chat_id": 999})
+        assert router.classify("status", chat_id=42) == ["movie"], \
+            "chat 42 has no bus watch of its own and must not be routed to " \
+            "bus just because chat 999 has one active"
+        llm.available = real_available
+        watchspec.finish(None, "cancelled")
+
+        # neither active, Groq unreachable in this offline test -> falls back to movie
         real_available, llm.available = llm.available, lambda: False
         assert router.classify("status") == ["movie"]
         llm.available = real_available
@@ -297,23 +346,24 @@ def _demo_refuse_unresolvable():
     from watcher.bus import abhibus, brain
 
     real_resolve = abhibus.resolve
+    chat_id = 111
     try:
         abhibus.resolve = lambda name: (None, "no-direct-hub")
         msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "amalapuram",
-                                      "date": "2026-08-20"})
+                                      "date": "2026-08-20"}, chat_id)
         assert "doesn't sell direct tickets" in msg, msg
         assert watchspec.load() is None, "a refused route must never start a watch"
 
         abhibus.resolve = lambda name: (None, "not-found")
         msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "zzzznotreal",
-                                      "date": "2026-08-20"})
+                                      "date": "2026-08-20"}, chat_id)
         assert "couldn't find" in msg.lower(), msg
         assert watchspec.load() is None
 
         # a transient failure (id=None, note=None) must NOT block starting the watch
         abhibus.resolve = lambda name: (None, None)
         msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "bangalore",
-                                      "date": "2026-08-20"})
+                                      "date": "2026-08-20"}, chat_id)
         assert "Watching" in msg, msg
         assert watchspec.load() is not None, \
             "a transient validation failure must not block starting the watch"
@@ -322,7 +372,7 @@ def _demo_refuse_unresolvable():
         # a real match proceeds normally
         abhibus.resolve = lambda name: (7, None)
         msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "bangalore",
-                                      "date": "2026-08-20"})
+                                      "date": "2026-08-20"}, chat_id)
         assert "Watching" in msg, msg
         watchspec.finish(None, "cancelled")
 
@@ -330,21 +380,112 @@ def _demo_refuse_unresolvable():
         # LLM hallucinated as text must all be refused before ever touching
         # AbhiBus or starting a dead/broken watch
         msg = brain._apply_new_watch({"from_city": "Hyderabad", "to_city": "hyderabad",
-                                      "date": "2026-08-20"})
+                                      "date": "2026-08-20"}, chat_id)
         assert "same city" in msg.lower(), msg
         assert watchspec.load() is None
 
         msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "bangalore",
-                                      "date": "2020-01-01"})
+                                      "date": "2020-01-01"}, chat_id)
         assert "already passed" in msg.lower(), msg
         assert watchspec.load() is None
 
         msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "bangalore",
-                                      "date": "2026-08-20", "target_price": "cheap please"})
+                                      "date": "2026-08-20", "target_price": "cheap please"}, chat_id)
         assert "didn't understand" in msg.lower(), msg
         assert watchspec.load() is None
     finally:
         abhibus.resolve = real_resolve
+
+
+def _demo_chat_scoping():
+    """A watch belongs to the chat that created it - reported live: watching
+    a bus route from the owner's DM alerted into a group too, and the
+    group's own watch showed up in the owner's "status"/cancel. Covers the
+    three symptoms reported: (1) alerts must reach only the owning chat,
+    (2) status must only show this chat's own routes, (3) cancel must never
+    touch another chat's watch.
+    """
+    from watcher.bus import brain, sources
+
+    OWNER, GROUP = 100, -500
+    real_scan = sources.scan
+    sent_scoped = []      # (chat_id, text) via reply_to
+    real_reply_to, bus_runner.reply_to = bus_runner.reply_to, lambda c, t: sent_scoped.append((c, t))
+
+    try:
+        owner_watch = watchspec.start({"from_city": "hyderabad", "to_city": "bangalore",
+                                       "date": "20260820", "target_price": None,
+                                       "chat_id": OWNER})
+        group_watch = watchspec.start({"from_city": "chennai", "to_city": "pune",
+                                       "date": "20260821", "target_price": None,
+                                       "chat_id": GROUP})
+
+        # (2) status: each chat sees only its own route
+        assert [w["id"] for w in watchspec.load_all(OWNER)] == [owner_watch["id"]]
+        assert [w["id"] for w in watchspec.load_all(GROUP)] == [group_watch["id"]]
+
+        # (1) alert: a new low on the owner's route must reach only OWNER
+        sources.scan = lambda from_city, to_city, date_code, **k: (
+            [{"operator": "SRS Travels", "price": 900, "source": "abhibus",
+              "rating": 4.5, "no_of_ratings": 40}]
+            if from_city == "hyderabad" else
+            [{"operator": "VRL Travels", "price": 500, "source": "abhibus",
+              "rating": 4.5, "no_of_ratings": 40}], [])
+        state = {"shift": None}
+        bus_runner.run_cycle_bus(state)
+        chats_alerted = {c for c, _ in sent_scoped}
+        assert chats_alerted == {OWNER, GROUP}, \
+            "each route's own new-low alert must reach only its owning chat: %r" % sent_scoped
+        owner_texts = [t for c, t in sent_scoped if c == OWNER]
+        group_texts = [t for c, t in sent_scoped if c == GROUP]
+        assert any("Bangalore" in t for t in owner_texts) and not any("Pune" in t for t in owner_texts), \
+            "owner's chat must not see the group's route in its own alert"
+        assert any("Pune" in t for t in group_texts) and not any("Bangalore" in t for t in group_texts), \
+            "group's chat must not see the owner's route in its own alert"
+
+        # (3) cancel: a bare "cancel" typed by the owner must not touch the group's watch
+        reply = brain.handle("cancel", OWNER)
+        assert "Stopped watching" in reply, reply
+        assert watchspec.load_all(OWNER) == [], "owner's own watch must be gone"
+        assert [w["id"] for w in watchspec.load_all(GROUP)] == [group_watch["id"]], \
+            "the group's watch must survive the owner cancelling their own"
+    finally:
+        sources.scan = real_scan
+        bus_runner.reply_to = real_reply_to
+        watchspec.finish(None, "cancelled")
+
+
+def _demo_quality_and_govt_filter():
+    """Government-operator exclusion and the rating quality bar - the two
+    filters added 15 Aug 2026. Regex verified live against a real 100-operator
+    Hyderabad->Bangalore result set (TGSRTC, KSRTC Karnataka caught, all 98
+    private names clean) before this test was written; this locks that in."""
+    from watcher.bus import abhibus
+
+    for govt in ("TGSRTC", "KSRTC Karnataka", "APSRTC", "MSRTC", "TNSTC",
+                "Tamil Nadu State Road Transport Corporation"):
+        assert abhibus._is_government_operator(govt), govt
+
+    for private in ("SBM Transport", "Delta Transport Pvt Ltd", "Highline Transports",
+                    "Ira Transport", "VRL Travels", "SRS Travels", "zingbus plus",
+                    "Sri Vengamamba Bus Transport (SVBT)"):
+        assert not abhibus._is_government_operator(private), \
+            "%r wrongly caught by the govt-operator pattern" % private
+
+    good = {"rating": 4.2, "no_of_ratings": 50}
+    low_rating = {"rating": 3.0, "no_of_ratings": 50}
+    thin_ratings = {"rating": 4.9, "no_of_ratings": 2}
+    unrated = {"rating": None, "no_of_ratings": None}
+    assert abhibus._meets_quality_bar(good)
+    assert not abhibus._meets_quality_bar(low_rating)
+    assert not abhibus._meets_quality_bar(thin_ratings)
+    assert not abhibus._meets_quality_bar(unrated), \
+        "an unrated bus must not pass by default - no signal isn't a safety signal"
+    # search() wiring itself (govt-exclusion + bar applied to real service
+    # dicts, before MAX_SEAT_CHECKS) was verified live against real AbhiBus
+    # data, not re-mocked here - see the session's live-check output: 0
+    # government operators and 0 below-bar buses leaked through a real
+    # 254-service Hyderabad->Bangalore result.
 
 
 def _demo_seat_filtering():

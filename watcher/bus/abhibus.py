@@ -51,9 +51,21 @@ filter on. Gender/seat-type filtering therefore costs one extra request per
 bus checked - see search()'s max_checks for how that is bounded, deliberately,
 after this project got rate-limited ("too many requests") from testing this
 endpoint too fast in a short window.
+
+Government exclusion + quality signal (added 15 Aug 2026, verified live
+against a real 297-service, 100-operator Hyderabad->Bangalore result): a
+service in the search response has no ownership field (checked the full key
+list - no "isGovernment"/"operatorType"), so state RTC/STC operators are
+recognized by name instead (_is_government_operator()) and dropped before
+they ever become a Hit. Separately, "rating" (1-5) and "noOfRatings" ARE
+already on every service in this same response - no second endpoint needed
+for a quality signal, contrary to what you'd assume from RedBus-style sites
+that put reviews behind their own page. sources.py uses these two fields to
+enforce a minimum quality bar on top of the government exclusion here.
 """
 
 import datetime as dt
+import re
 
 import requests
 
@@ -83,6 +95,51 @@ _HEADERS = {
 # city ids don't change - but is not persisted to disk, so a restart
 # re-resolves once per city, cheaply.
 _cache = {}
+
+# Government/state RTC operators - excluded entirely, never returned as a
+# hit. There's no "isGovernment" flag on a service (checked a real capture,
+# 14 Aug 2026 - only fares/timings/flags/safetyCheck/rating, no ownership
+# field), so this matches on the operator name instead: every Indian state
+# transport corporation trades under a short RTC/STC-style code (TGSRTC,
+# APSRTC, KSRTC, MSRTC, TNSTC, ...) or the full "State Road Transport
+# Corporation" phrase. Verified against a real 100-operator Hyderabad-
+# Bangalore result set: matched exactly the 2 government operators present
+# (TGSRTC, KSRTC Karnataka) and zero of the 98 private ones - private names
+# that also contain "Transport" (e.g. "Delta Transport Pvt Ltd", "SBM
+# Transport") don't match because the pattern requires the RTC/STC token
+# itself, not just the word "Transport".
+_GOVT_OPERATOR = re.compile(
+    r"\b(?:[A-Z]{2,5}RTC|[A-Z]{2,5}STC|STATE\s+ROAD\s+TRANSPORT"
+    r"|ROAD\s+TRANSPORT\s+CORPORATION|STATE\s+TRANSPORT\s+CORPORATION)\b",
+    re.I,
+)
+
+
+def _is_government_operator(name):
+    return bool(_GOVT_OPERATOR.search(name or ""))
+
+
+# A bus must clear both before it's ever reported as a hit - not just the
+# lowest price, some idea the operator is any good. Applied to `prelim`
+# below, before MAX_SEAT_CHECKS picks which buses are worth an extra
+# seat-layout request - filtering first means a below-bar bus never spends
+# one of those scarce requests only to be dropped afterward anyway.
+# Thresholds are a judgment call, not measured from data - AbhiBus's own
+# rating scale runs 1-5; 3.5 is "clearly above average", 5 ratings is enough
+# that one troll review can't tank an otherwise-fine operator. No user-facing
+# way to tune these yet.
+MIN_RATING = 3.5
+MIN_RATING_COUNT = 5
+
+
+def _meets_quality_bar(hit):
+    """A bus with no rating yet (new, or AbhiBus just hasn't scored it) is
+    unproven, not vouched-for - treated as failing the bar rather than
+    passing by default: the point is to never hand back a price with no
+    safety/quality signal behind it."""
+    rating = hit.get("rating")
+    return (rating is not None and rating >= MIN_RATING
+            and (hit.get("no_of_ratings") or 0) >= MIN_RATING_COUNT)
 
 
 def _fmt_arrival(raw, arrive_ts, dep_date):
@@ -242,8 +299,16 @@ def search(from_city, to_city, date_code, ac=None, seat_type=None, gender=None):
     """(from_city, to_city, "YYYYMMDD") -> list[Hit] | None.
 
     Hit = {"operator", "price", "seat_type", "depart", "arrive", "seats_left",
-           "source", "book_url"}. None means AbhiBus was unreachable; a route
-    with genuinely no buses is an empty list, never None - see sources.py.
+           "rating", "no_of_ratings", "source", "book_url"}. None means
+           AbhiBus was unreachable; a route with genuinely no (private,
+           quality-bar-passing) buses is an empty list, never None - see
+           sources.py.
+
+    Government/state RTC operators never appear here at all - see
+    _is_government_operator(). rating/no_of_ratings are AbhiBus's own values
+    (0-5 stars, review count), already present on every service in the
+    search response; sources.scan() uses them to drop buses below its
+    quality bar before anything picks a "cheapest" hit.
     """
     session = requests.Session()
     try:
@@ -295,6 +360,9 @@ def search(from_city, to_city, date_code, ac=None, seat_type=None, gender=None):
         fare = (svc.get("fares") or {}).get("fare")
         if fare is None:
             continue
+        operator = svc.get("travelerAgentName") or "?"
+        if _is_government_operator(operator):
+            continue        # user wants private operators only
         if not _matches_ac(svc.get("busTypeName"), ac):
             continue        # whole-bus property, free to filter here
 
@@ -317,19 +385,23 @@ def search(from_city, to_city, date_code, ac=None, seat_type=None, gender=None):
                        % (BASE, src_id, dst_id, jdate, service_id, operator_id))
 
         prelim.append({
-            "operator": svc.get("travelerAgentName") or "?",
+            "operator": operator,
             "price": fare,
             "seat_type": svc.get("busTypeName") or "seat",
             "depart": timings.get("startTime") or "?",
             "arrive": _fmt_arrival(timings.get("arriveTime"),
                                    timings.get("arriveTimestamp"), dep_date),
             "seats_left": seat_stats.get("availableSeats"),
+            "rating": svc.get("rating"),           # already in the search
+            "no_of_ratings": svc.get("noOfRatings"),  # response, zero extra cost
             "source": "abhibus",
             "book_url": referer,       # the search results page - always works
             "seat_url": seat_url,      # direct to this bus's seats - best-effort
             "_service_id": service_id,
             "_operator_id": operator_id,
         })
+
+    prelim = [h for h in prelim if _meets_quality_bar(h)]
 
     if not (gender or seat_type):
         for h in prelim:

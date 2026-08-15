@@ -13,6 +13,7 @@ cleared.
 
 import datetime as dt
 
+from . import watchspec
 from .config import *
 from .messages import shift_report
 from ..telegram import send_telegram
@@ -26,11 +27,19 @@ def maybe_report_shift(state, watching):
 
     if tally and (tally["name"] != (shift[0] if shift else None)
                   or tally["date"] != now.strftime("%Y%m%d")):
+        # A route cancelled (or target-reached/expired) partway through the
+        # shift stays in tally["routes"] until now - run_cycle_bus() only
+        # ever adds/updates entries for routes still in watchspec.load_all()
+        # each cycle, it never removes one that dropped out. Without this
+        # prune, the report at shift-end would still list a route the user
+        # already cancelled as if it were still being watched.
+        still_active = {w["id"] for w in watchspec.load_all()}
+        tally["routes"] = {wid: r for wid, r in tally["routes"].items() if wid in still_active}
         send_telegram(shift_report(tally))
         print("sent bus %s shift report" % tally["name"])
         tally = None
     if shift and watching and not tally:
         tally = {"name": shift[0], "date": now.strftime("%Y%m%d"), "checks": 0,
-                 "first": None, "last": None, "errors": 0, "route": None, "lowest": None}
+                 "first": None, "last": None, "errors": 0, "routes": {}}
     state["shift"] = tally
     return tally

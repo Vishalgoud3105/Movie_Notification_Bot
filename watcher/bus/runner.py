@@ -14,9 +14,24 @@ import datetime as dt
 
 from . import sources, watchspec
 from .config import *
-from .messages import alert_text, pretty_spec, status_text, target_met_text
+from .messages import alert_text, live_report, pretty_spec, target_met_text
 from .shifts import maybe_report_shift
 from ..telegram import reply_to, send_telegram, wants_report
+
+
+def _send_to_owning_chat(spec, text):
+    """A new-low/target-met alert reaches only the chat that started this
+    watch - never every chat the bot is in. This was the actual reported
+    leak: watching a bus route from the owner's DM was alerting into every
+    group too, because alerts used to go through send_telegram() (broadcast)
+    unconditionally. Falls back to a broadcast only for a watch persisted
+    before chat scoping existed (no "chat_id" field at all) so an
+    already-running pre-migration watch doesn't just go silent."""
+    chat_id = spec.get("chat_id")
+    if chat_id is not None:
+        reply_to(chat_id, text)
+    else:
+        send_telegram(text)
 
 
 def boot():
@@ -35,20 +50,17 @@ def run_cycle_bus(state):
     Returns (hits, broken) - hits from every route pooled into one flat list,
     broken likewise - so a chat reply right after can reuse this scan instead
     of costing the sites an extra request. `state` carries the shift tally
-    across cycles, same role as it plays for the movie domain; the tally's
-    "route"/"lowest" summary fields reflect whichever route was processed
-    last in a given cycle when several are active - a deliberate
-    simplification, the shift report stays a rough proof-of-life signal, not
-    a full per-route breakdown (status/cancel already list every route by
-    name, see messages.status_text()).
+    across cycles, same role as it plays for the movie domain; the tally
+    tracks every route active during the shift, keyed by watch id, same as
+    the movie side's per-movie breakdown (see messages.shift_report()).
 
     Each hit is tagged with the watch id it came from ("_watch_id"). Between
-    scheduled scans, "status" reuses whatever this function last returned -
-    without the tag, cancelling a route and starting a new one on a
-    different date would show the OLD route's leftover fares as if they
-    belonged to the new watch until the next scan overwrote them.
-    status_text() filters to only currently-active watch ids for exactly
-    this reason.
+    scheduled scans, "status" (messages.live_report()) reuses whatever this
+    function last returned - without the tag, cancelling a route and
+    starting a new one on a different date would show the OLD route's
+    leftover fares as if they belonged to the new watch until the next scan
+    overwrote them. live_report() groups hits by that tag for exactly this
+    reason.
     """
     specs = watchspec.load_all()
     tally = maybe_report_shift(state, watching=bool(specs))
@@ -77,10 +89,11 @@ def run_cycle_bus(state):
         if tally:
             tally["checks"] += 1
             tally["errors"] += len(broken)
-            tally["route"] = pretty_spec(spec)
             stamp = dt.datetime.now(IST).strftime("%I:%M %p").lstrip("0")
             tally["first"] = tally["first"] or stamp
             tally["last"] = stamp
+            entry = tally["routes"].setdefault(spec["id"], {"route": None, "lowest": None})
+            entry["route"] = pretty_spec(spec)     # kept fresh - a "modify" mid-shift changes it
 
         if not hits:
             print("bus: no fares found yet for %s -> %s" % (spec["from_city"], spec["to_city"]))
@@ -88,17 +101,18 @@ def run_cycle_bus(state):
 
         cheapest = min(hits, key=lambda h: h["price"])
         if tally:
-            tally["lowest"] = min(cheapest["price"], tally["lowest"] or cheapest["price"])
+            entry = tally["routes"][spec["id"]]
+            entry["lowest"] = min(cheapest["price"], entry["lowest"]) if entry["lowest"] else cheapest["price"]
 
         target = spec.get("target_price")
         if target and cheapest["price"] <= target:
-            send_telegram(target_met_text(cheapest, spec))
+            _send_to_owning_chat(spec, target_met_text(cheapest, spec))
             watchspec.finish(spec["id"], "target_reached")
             continue
 
         previous_low = spec.get("lowest_seen")
         if previous_low is None or cheapest["price"] < previous_low:
-            send_telegram(alert_text(cheapest, previous_low, spec))
+            _send_to_owning_chat(spec, alert_text(cheapest, previous_low, spec))
             watchspec.note_price(spec["id"], cheapest["price"])
         else:
             print("bus: cheapest right now Rs.%s, no new low (%s -> %s)"
@@ -109,12 +123,14 @@ def run_cycle_bus(state):
 
 def answer(chat_id, cmd, hits, broken, tally=None):
     """Reply to one chat message about bus watches - to `chat_id` only, never
-    broadcast (an alert/shift report is a different, proactive path that
-    still uses send_telegram() to reach every known chat)."""
+    broadcast. A price alert is likewise scoped to whichever chat started
+    that watch (see _send_to_owning_chat()); only the shift report still
+    broadcasts to every known chat - it summarizes every route regardless of
+    which chat owns it, not any one chat's own state."""
     print("bus command from you: %s" % cmd)
     try:
         from .brain import handle
-        reply = handle(cmd, hits, broken, tally)
+        reply = handle(cmd, chat_id, hits, broken, tally)
         if reply:
             reply_to(chat_id, reply)
             return
@@ -122,7 +138,7 @@ def answer(chat_id, cmd, hits, broken, tally=None):
         print("bus brain failed, falling back to keywords: %s: %s" % (type(e).__name__, e))
 
     if wants_report(cmd):
-        reply_to(chat_id, status_text(watchspec.load_all(), hits, broken))
+        reply_to(chat_id, live_report(watchspec.load_all(chat_id), hits, broken))
     else:
         reply_to(chat_id, "🚌 Say something like \"watch bus from Hyderabad to "
                          "Bangalore on 20 Aug\" or \"status\".")

@@ -16,18 +16,19 @@ import datetime as dt
 from . import watchspec
 from .. import llm
 from .config import *
-from .messages import pretty_date, pretty_spec, status_text
+from .messages import live_report, pretty_date, pretty_spec
 from .prompt_template import CHAT_SYSTEM, EXTRACT_SYSTEM, EXTRACT_USER, TROUBLESHOOT_SYSTEM
-from ..telegram import send_telegram, wants_report
+from ..telegram import wants_report
 
 CANCEL_WORDS = ("cancel", "stop watching", "forget it", "abort", "reset")
 OWNER_CONTEXT = "a traveller in Hyderabad watching bus fares"
 
 
-def _match_named(text):
-    """The id of an active route named in `text` ("cancel the bangalore one"),
-    or None if none is named - callers treat None as "act on every route"."""
-    for w in watchspec.load_all():
+def _match_named(text, chat_id):
+    """The id of `chat_id`'s own active route named in `text` ("cancel the
+    bangalore one"), or None if none is named - callers treat None as "act
+    on every route this chat can see"."""
+    for w in watchspec.load_all(chat_id):
         if (w.get("from_city") or "") in text or (w.get("to_city") or "") in text:
             return w["id"]
     return None
@@ -56,8 +57,9 @@ def _refuse_unresolvable(from_city, to_city):
     return None
 
 
-def _apply_new_watch(spec):
-    """Validate an extracted spec and start watching it. Returns the reply text."""
+def _apply_new_watch(spec, chat_id):
+    """Validate an extracted spec and start watching it, scoped to `chat_id`.
+    Returns the reply text."""
     from_city = (spec.get("from_city") or "").strip()
     to_city = (spec.get("to_city") or "").strip()
     date = spec.get("date")
@@ -112,12 +114,16 @@ def _apply_new_watch(spec):
         "ac": ac,
         "seat_type": seat_type,
         "gender": gender,
+        "chat_id": chat_id,
     }
     # Watching the same route+date again reinforces the existing entry
     # instead of starting a wasteful duplicate that double-scans it - this
     # also covers "same route, just change the seat filter" as an update
     # to the existing watch rather than a second one for the same route.
-    existing = next((w for w in watchspec.load_all()
+    # Scoped to this chat's own watches only - the owner watching the same
+    # route as a group must get their own independent watch, not silently
+    # merge into (and inherit the cancel/alerts of) the group's.
+    existing = next((w for w in watchspec.load_all(chat_id)
                      if w.get("from_city") == watch["from_city"]
                      and w.get("to_city") == watch["to_city"]
                      and w.get("date") == watch["date"]), None)
@@ -139,18 +145,24 @@ def _apply_new_watch(spec):
             % (from_city.title(), to_city.title(), date, filter_note, goal, SCAN_EVERY // 60))
 
 
-def handle(message, hits=None, broken=None, tally=None):
-    """Work out what one message wants and return the reply text."""
+def handle(message, chat_id, hits=None, broken=None, tally=None):
+    """Work out what one message wants and return the reply text.
+
+    Every watchspec lookup here is scoped to `chat_id` - a watch belongs to
+    the chat that created it, so "status"/"cancel"/"modify" typed in the
+    owner's DM must never see, alert into, or touch a group's own watch, and
+    vice versa (see watchspec.load_all()'s chat_id filtering).
+    """
     text = (message or "").strip()
     low = text.lower()
     hits, broken = hits or [], broken or []
 
     # 1. deterministic first - must survive Groq being unavailable
     if wants_report(low):
-        return status_text(watchspec.load_all(), hits, broken)
+        return live_report(watchspec.load_all(chat_id), hits, broken)
 
     if any(w in low for w in CANCEL_WORDS):
-        stopped = watchspec.finish(_match_named(low), "cancelled")
+        stopped = watchspec.finish(_match_named(low, chat_id), "cancelled", chat_id=chat_id)
         if not stopped:
             return "Nothing to cancel - no bus route is being watched."
         return ("Stopped watching: %s.\n\nTell me what to watch next."
@@ -167,12 +179,12 @@ def handle(message, hits=None, broken=None, tally=None):
 
     if spec and spec.get("intent") in ("watch", "modify"):
         if spec["intent"] == "modify":
-            # Only unambiguous when exactly one route is active - with several,
-            # guessing which one a bare "make it under 700" refers to risks
-            # silently mutating the wrong one, so it falls through and starts
-            # a new watch instead (which then gets deduped against an
-            # identical existing route by _apply_new_watch() anyway).
-            active = watchspec.load_all()
+            # Only unambiguous when exactly one route is active in THIS chat -
+            # with several, guessing which one a bare "make it under 700"
+            # refers to risks silently mutating the wrong one, so it falls
+            # through and starts a new watch instead (which then gets deduped
+            # against an identical existing route by _apply_new_watch() anyway).
+            active = watchspec.load_all(chat_id)
             if len(active) == 1:
                 current = active[0]
                 merged = dict(current)
@@ -181,16 +193,16 @@ def handle(message, hits=None, broken=None, tally=None):
                         merged[k] = v
                 spec = merged
                 spec["id"] = current["id"]
-        return _apply_new_watch(spec)
+        return _apply_new_watch(spec, chat_id)
 
     if spec and spec.get("intent") == "cancel":
-        stopped = watchspec.finish(_match_named(low), "cancelled")
+        stopped = watchspec.finish(_match_named(low, chat_id), "cancelled", chat_id=chat_id)
         if not stopped:
             return "Nothing to cancel - no bus route is being watched."
         return "Stopped watching: %s." % "; ".join(pretty_spec(w) for w in stopped)
 
     # 3. troubleshooting vs ordinary chat
-    facts = watchspec.describe()
+    facts = watchspec.describe(chat_id)
     if any(w in low for w in ("not working", "broken", "why", "error", "fix",
                               "problem", "didn't get", "did not get", "stopped")):
         reply = llm.troubleshoot(text, facts, system=TROUBLESHOOT_SYSTEM)
@@ -201,6 +213,3 @@ def handle(message, hits=None, broken=None, tally=None):
                      "describe a route, e.g. \"watch bus from Hyderabad to "
                      "Bangalore on 20 Aug, notify under 800\".")
 
-
-def reply(message, hits=None, broken=None, tally=None):
-    send_telegram(handle(message, hits, broken, tally))

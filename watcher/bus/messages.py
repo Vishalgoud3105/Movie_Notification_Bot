@@ -29,19 +29,24 @@ def pretty_spec(spec):
     return " · ".join(bits)
 
 
+def _rating_line(hit):
+    """Only private, quality-bar-passing operators ever reach here (see
+    sources.py) - showing the number is what makes that filtering visible to
+    the user instead of an invisible policy they have to take on faith."""
+    if hit.get("rating") is not None:
+        return "⭐ %.1f (%d ratings)" % (hit["rating"], hit.get("no_of_ratings") or 0)
+    return None
+
+
 def _links(hit):
-    """The link block for one hit: the direct-to-seats deep link (verified
-    8/8 across different operators - see abhibus.py's docstring for the
-    field mixup that caused earlier failures) alongside the plain
-    search-results link as a fallback, in case some operator or route this
-    hasn't hit yet still doesn't resolve - a broken link with nothing to
-    fall back on is worse than one slightly redundant extra line."""
-    lines = []
+    """The direct-to-seats deep link only (verified 8/8 across different
+    operators - see abhibus.py's docstring for the field mixup that caused
+    earlier failures). The plain search-results fallback link was dropped on
+    request - a user who gets this alert wants to book THIS bus, not land on
+    a results page and have to find it again."""
     if hit.get("seat_url"):
-        lines.append("🔗 Seats: %s" % hit["seat_url"])
-    if hit.get("book_url"):
-        lines.append("🔗 Search: %s" % hit["book_url"])
-    return lines
+        return ["🔗 Seats: %s" % hit["seat_url"]]
+    return []
 
 
 def alert_text(hit, previous_low, spec):
@@ -55,6 +60,9 @@ def alert_text(hit, previous_low, spec):
         "💺 %s · %s -> %s" % (hit.get("seat_type", "seat"), hit.get("depart", "?"),
                               hit.get("arrive", "?")),
     ]
+    rating_line = _rating_line(hit)
+    if rating_line:
+        lines.append(rating_line)
     if hit.get("seat_no"):
         # only present when a gender/seat-type filter matched a specific
         # seat - the price above is already that seat's own fare, not the
@@ -73,6 +81,7 @@ def alert_text(hit, previous_low, spec):
 def target_met_text(hit, spec):
     """The one-shot alert when a target price is reached - the goal, watch ends."""
     links = _links(hit)
+    rating_line = _rating_line(hit)
     return "\n".join([
         "✅🚌 TARGET PRICE HIT!",
         "",
@@ -80,7 +89,9 @@ def target_met_text(hit, spec):
                           pretty_date(spec["date"])),
         "🏷️ ₹%s on %s (%s) - at or under your ₹%s target"
         % (hit["price"], hit["operator"], hit["source"], spec["target_price"]),
-    ] + (["🪑 Seat %s" % hit["seat_no"]] if hit.get("seat_no") else []) + [
+    ] + ([rating_line] if rating_line else []) + (
+        ["🪑 Seat %s" % hit["seat_no"]] if hit.get("seat_no") else []
+    ) + [
         "",
     ] + (links + [""] if links else []) + [
         "I'm done watching this route. Tell me what's next.",
@@ -91,7 +102,14 @@ def shift_report(t):
     """End-of-shift summary: proof the bus watcher is alive and what it saw.
 
     Mirrors watcher/movies/messages.py::shift_report()'s shape and boundary
-    math exactly, bus-flavored content.
+    math exactly, bus-flavored content. `t["routes"]` is
+    {watch_id: {"route", "lowest", "operator"?, "rating"?, "no_of_ratings"?}}
+    - one entry per route active during the shift, not just whichever was
+    processed last (see runner.py::run_cycle_bus()) - several can be watched
+    at once and each gets its own line, same as the movie side lists every
+    watched movie. operator/rating are only present when live_report() built
+    this dict from a fresh scan; a real end-of-shift tally only ever tracks
+    the lowest price, not which specific bus/operator hit it each time.
     """
     name = t["name"]
     lo, hi = next(((a, b) for n, a, b in SHIFTS if n == name), (0, 0))
@@ -105,50 +123,68 @@ def shift_report(t):
              "📡 AbhiBus reachable: %s" % ("yes ✅" if not t["errors"]
                                            else "%d failed check(s) ⚠️" % t["errors"])]
     lines.append("")
-    if t.get("route"):
-        lines.append("🎯 Watching: %s" % t["route"])
-        lines.append("💰 Lowest seen: ₹%s" % t["lowest"] if t.get("lowest")
-                     else "🔒 No fares found yet")
-    else:
+    routes = t.get("routes") or {}
+    if not routes:
         lines.append("😴 No bus route being watched right now.")
+    else:
+        for r in routes.values():
+            lines.append("🎯 Watching: %s" % r["route"])
+            if r.get("lowest_ever"):
+                lines.append("  📉 All-time lowest seen: ₹%s" % r["lowest_ever"])
+            if r.get("lowest"):
+                tail = (" on %s (⭐ %.1f, %d ratings)" % (r["operator"], r["rating"], r.get("no_of_ratings") or 0)
+                        if r.get("rating") is not None else "")
+                lines.append("  💰 Lowest seen: ₹%s%s" % (r["lowest"], tail))
+                for link in _links(r):
+                    lines.append("  " + link)
+            else:
+                lines.append("  🔒 No fares found yet")
     lines += ["", "⏭️ Next up: %s shift (%02d:00-%02d:00). 👀"
               % (nxt[0], nxt[1], nxt[2])]
     return "\n".join(lines)
 
 
-def status_text(specs, hits, broken):
-    """On-demand report: every route being watched, and the cheapest fare
-    seen right now across all of them combined (hits is pooled from every
-    active route's scan this cycle - see run_cycle_bus()).
+def live_report(specs, hits, broken):
+    """A shift report describing this very moment, from an already-done scan -
+    what "status"/"check"/"update" actually replies with, mirroring
+    watcher/movies/messages.py::live_report()'s trick of reusing
+    shift_report()'s shape for an on-demand check instead of a flat one-off
+    format.
 
-    Filters hits to only currently-active watch ids first - between
-    scheduled scans this reuses whatever the last cycle returned, and
-    without this filter a route that was just cancelled or changed to a
-    different date would show its old, no-longer-relevant fares as if they
-    belonged to the new watch until the next scan overwrites them.
+    Groups `hits` by each hit's "_watch_id" tag (set in run_cycle_bus()) so
+    a route with no fresh data this cycle shows "no fares found yet" instead
+    of borrowing another route's price - the same reasoning the old
+    status_text() applied when it filtered to active watch ids, folded in
+    here instead of kept as a second, differently-shaped reply function.
     """
     if not specs:
-        return "🚌 No bus route is being watched right now. Say something like " \
-               "\"watch bus from Hyderabad to Bangalore on 20 Aug\"."
-    lines = []
-    for spec in specs:
-        lines.append("🚌 Watching: %s" % pretty_spec(spec))
-        if spec.get("lowest_seen"):
-            lines.append("   💰 Lowest seen so far: ₹%s" % spec["lowest_seen"])
+        return ("🚌 No bus route is being watched right now. Say something like "
+                "\"watch bus from Hyderabad to Bangalore on 20 Aug\".")
 
-    active_ids = {s["id"] for s in specs}
-    relevant = [h for h in (hits or []) if h.get("_watch_id") in active_ids]
-    if relevant:
-        cheapest = min(relevant, key=lambda h: h["price"])
-        lines.append("")
-        lines.append("📊 Cheapest right now overall: ₹%s on %s (%s)"
-                     % (cheapest["price"], cheapest["operator"], cheapest["source"]))
-        lines += _links(cheapest)
-    elif hits:
-        # there IS pooled data, just none of it for a currently-active watch -
-        # say so rather than silently showing nothing with no explanation
-        lines.append("")
-        lines.append("📊 No fresh data for the current watch yet - checking soon.")
-    if broken:
-        lines.append("⚠️ Could not reach: %s" % ", ".join(broken))
-    return "\n".join(lines)
+    now = dt.datetime.now(IST)
+    shift = shift_at(now)
+    name = shift[0] if shift else SHIFTS[-1][0]   # 00:00-07:00: report the shift just ended
+    stamp = now.strftime("%I:%M %p").lstrip("0")
+
+    routes = {}
+    for spec in specs:
+        relevant = [h for h in (hits or []) if h.get("_watch_id") == spec["id"]]
+        cheapest = min(relevant, key=lambda h: h["price"]) if relevant else None
+        routes[spec["id"]] = {
+            "route": pretty_spec(spec),
+            "lowest": cheapest["price"] if cheapest else None,
+            "operator": cheapest["operator"] if cheapest else None,
+            "rating": cheapest.get("rating") if cheapest else None,
+            "no_of_ratings": cheapest.get("no_of_ratings") if cheapest else None,
+            "seat_url": cheapest.get("seat_url") if cheapest else None,
+            # the persistent all-time-low this watch has ever alerted on
+            # (watchspec.note_price()) - distinct from "lowest" above, which
+            # is only this instant's pooled hits and can be None between scans.
+            "lowest_ever": spec.get("lowest_seen"),
+        }
+    return shift_report({
+        "name": name, "date": now.strftime("%Y%m%d"), "checks": 1,
+        "first": stamp, "last": stamp, "errors": len(broken), "routes": routes,
+    })
+
+

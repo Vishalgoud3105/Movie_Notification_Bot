@@ -38,9 +38,23 @@ def _save(watches):
     os.replace(tmp, WATCH_FILE)      # atomic, same reason as seen.json
 
 
-def load_all():
-    """Every route being watched right now."""
-    return [w for w in _load_raw() if isinstance(w, dict) and w.get("active")]
+def load_all(chat_id=None):
+    """Every route being watched right now - across every chat, unless
+    `chat_id` is given, in which case only that chat's own watches (plus any
+    legacy watch from before chat scoping existed, which has no chat_id at
+    all - treated as visible from anywhere until it's cancelled/replaced,
+    rather than orphaned and un-cancelable by everyone).
+
+    Chat-scoping matters here, not just on the reply: a watch started in the
+    owner's DM must never show up, alert into, or be cancellable from a group
+    the bot is also in, and vice versa - see run_cycle_bus()'s alert send and
+    brain.py's cancel/status/modify handling, all of which pass their chat_id
+    through to this.
+    """
+    watches = [w for w in _load_raw() if isinstance(w, dict) and w.get("active")]
+    if chat_id is not None:
+        watches = [w for w in watches if w.get("chat_id") in (None, chat_id)]
+    return watches
 
 
 def load():
@@ -51,15 +65,16 @@ def load():
     return watches[0] if watches else None
 
 
-def find(from_city=None, to_city=None):
-    """Best-effort match of a spoken route against active watches - substring,
-    case-insensitive. Used to figure out which watch a message like "cancel
-    the bangalore one" refers to when several are active."""
+def find(chat_id, from_city=None, to_city=None):
+    """Best-effort match of a spoken route against `chat_id`'s own active
+    watches - substring, case-insensitive. Used to figure out which watch a
+    message like "cancel the bangalore one" refers to when several are
+    active in the same chat."""
     from_city = (from_city or "").strip().lower()
     to_city = (to_city or "").strip().lower()
     if not (from_city or to_city):
         return None
-    for w in load_all():
+    for w in load_all(chat_id):
         if ((not from_city or from_city in (w.get("from_city") or ""))
                 and (not to_city or to_city in (w.get("to_city") or ""))):
             return w
@@ -101,8 +116,12 @@ def start(spec):
     return spec
 
 
-def finish(watch_id=None, reason="cancelled"):
-    """Stop watching one route (by id) or every active route (id=None).
+def finish(watch_id=None, reason="cancelled", chat_id=None):
+    """Stop watching one route (by id) or every active route this chat can
+    see (id=None) - "every active route" is scoped by `chat_id` the same way
+    load_all() is, so a bare "cancel" typed in a group can never sweep away
+    the owner's own DM watch or another group's, only this chat's (plus any
+    not-yet-migrated legacy watch with no chat_id at all).
 
     Always returns a LIST of the specs that were stopped (possibly empty),
     even for a single id - callers format "stopped watching: X" from a list
@@ -111,12 +130,17 @@ def finish(watch_id=None, reason="cancelled"):
     watches = _load_raw()
     stopped = []
     for w in watches:
-        if w.get("active") and (watch_id is None or w.get("id") == watch_id):
-            w = dict(w)
-            w["active"] = False
-            w["ended"] = dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M")
-            w["ended_reason"] = reason
-            stopped.append(w)
+        if not w.get("active"):
+            continue
+        if watch_id is not None and w.get("id") != watch_id:
+            continue
+        if chat_id is not None and w.get("chat_id") not in (None, chat_id):
+            continue
+        w = dict(w)
+        w["active"] = False
+        w["ended"] = dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M")
+        w["ended_reason"] = reason
+        stopped.append(w)
     stopped_ids = {w["id"] for w in stopped}
     remaining = [w for w in watches if w.get("id") not in stopped_ids]
     _save(remaining)
@@ -135,10 +159,12 @@ def note_price(watch_id, price):
     return updated
 
 
-def describe():
-    """Facts block for the LLM prompts - only things actually known."""
+def describe(chat_id=None):
+    """Facts block for the LLM prompts - only things actually known, and only
+    this chat's own watches when chat_id is given (onboarding.py calls this
+    unscoped, before any chat-specific context exists)."""
     from .messages import pretty_spec
-    watches = load_all()
+    watches = load_all(chat_id)
     if not watches:
         return "No bus watch is active right now."
     lines = []

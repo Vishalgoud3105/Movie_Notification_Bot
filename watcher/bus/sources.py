@@ -20,6 +20,14 @@ def scan(from_city, to_city, date_code, ac=None, seat_type=None, gender=None):
     ac/seat_type/gender are optional filters straight from the watch spec -
     see abhibus.search()'s docstring for what each costs (ac is free,
     seat_type/gender cost one extra request per bus checked, bounded).
+
+    Hits are already private-operator-only and already above abhibus.py's
+    quality bar (MIN_RATING/MIN_RATING_COUNT) - both are enforced inside
+    search() itself, before the seat-layout refinement step, so a below-bar
+    bus never spends one of those bounded, rate-limit-prone requests only to
+    be dropped afterward anyway. If a second source is ever added here, it
+    needs to enforce its own bar the same way - there's nothing left to
+    filter at this merge point once there's only one source doing the work.
     """
     try:
         found = abhibus.search(from_city, to_city, date_code,
