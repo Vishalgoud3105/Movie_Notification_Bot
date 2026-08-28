@@ -103,9 +103,9 @@ District is also the better source:
 ```
 watch.py                CLI entry only
 watcher/
-  config.py             SHARED: Telegram/Groq creds, timing, IST clock, keywords
+  config.py             SHARED: Telegram/Mistral creds, timing, IST clock, keywords
   telegram.py           SHARED: send, poll — pure transport, no domain knowledge
-  llm.py                SHARED: Groq client, prompts passed in per domain
+  llm.py                SHARED: Mistral client, prompts passed in per domain
   router.py             classifies a chat message movie-vs-bus, one shared poll
   runner.py             top-level entry points; --serve runs both domains
 
@@ -140,7 +140,7 @@ tests/test_bus.py       bus offline self-checks, no framework
 deploy/watcher.service  systemd unit
 ```
 
-Only dependency is **`requests`** — Groq speaks the OpenAI chat shape, so no SDK.
+Only dependency is **`requests`** — Mistral speaks the OpenAI chat shape, so no SDK.
 No web server, no framework: long polling means outbound calls only, so there's
 nothing to host and no inbound surface.
 
@@ -177,7 +177,7 @@ journalctl -u watcher -f
 
 ## Talking to it
 
-Needs `GROQ_API_KEY` (free at console.groq.com). Describe what you want:
+Needs `MISTRAL_API_KEY` (console.mistral.ai). Describe what you want:
 
 > *"watch Spider-Man 4DX 3D at Irrum Manzil on 8 and 9 Aug, morning to evening"*
 
@@ -190,7 +190,7 @@ watcher looked healthy — works out dates and the time window, confirms, and
 Live events (concerts, cricket) are declined rather than half-supported:
 District's `/events` pages use a different structure.
 
-### Keyword commands — always work, even with Groq down
+### Keyword commands — always work, even with Mistral down
 
 > report · status · check · update · news
 
@@ -239,7 +239,7 @@ Every value has a default in code; `.env` only overrides.
 | Var | Meaning |
 |---|---|
 | `TELEGRAM_API_TOKEN` / `TELEGRAM_CHAT_ID` | required |
-| `GROQ_API_KEY` / `GROQ_MODEL` | optional; enables plain-English chat |
+| `MISTRAL_API_KEY` / `MISTRAL_MODEL` | optional; enables plain-English chat |
 | `SOURCE` | `district` (default) or `bms` |
 | `DISTRICT_URL` | the city-specific movie page |
 | `HOME_CITY` | used when a chat request names no city |

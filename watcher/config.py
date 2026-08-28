@@ -1,4 +1,4 @@
-"""Settings shared by every domain (movies, bus, ...): Telegram/Groq, timing, clock.
+"""Settings shared by every domain (movies, bus, ...): Telegram/Mistral, timing, clock.
 
 Domain-specific settings (movie showtimes, bus routes) live in each domain's
 own config.py, layered on top of this one via `from ..config import *`.
@@ -32,10 +32,23 @@ if os.path.exists(DOTENV):
 HOME_CITY = os.environ.get("HOME_CITY", "hyderabad").strip().lower()
 
 
-# Groq powers understanding messages and phrasing replies - never detection.
+# Mistral powers understanding messages and phrasing replies - never detection.
 # Without a key the bot still works; it just falls back to keyword commands.
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-# GROQ_API_KEY is read from the environment at call time, never stored here.
+#
+# Was Groq (llama-3.3-70b-versatile) until 29 Aug 2026: that model was
+# deprecated (shutdown 16 Aug 2026), every call silently returned None
+# (llm._call() swallows the error), which looked exactly like the bot
+# ignoring every message rather than an LLM outage - see
+# [[project-bms-gotchas]]. Groq's suggested replacement (openai/gpt-oss-120b)
+# turned out to be a reasoning model that burns tokens on hidden reasoning
+# before any visible output, needing every max_tokens budget in llm.py
+# retuned - switched providers entirely instead of chasing that per-call.
+# mistral-medium-latest is the closest capability tier to the outgoing
+# 70B-class model; mistral-large-latest/mistral-small-latest are the other
+# two real Mistral tiers if a slower-but-stronger or faster-but-lighter
+# model is ever wanted instead.
+MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "mistral-medium-latest")
+# MISTRAL_API_KEY is read from the environment at call time, never stored here.
 
 
 # --serve only: how often a domain's sources are scanned, and how long each

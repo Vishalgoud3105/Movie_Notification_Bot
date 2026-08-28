@@ -1,7 +1,7 @@
 """Deciding what a chat message about a bus fare means, and answering it.
 
 Mirrors watcher/movies/brain.py's routing order and reasoning exactly:
-deterministic keywords first (must survive Groq being down), then the LLM for
+deterministic keywords first (must survive Mistral being down), then the LLM for
 setting up/changing/cancelling a watch, then a grounded chat fallback. The
 model decides what you MEANT; whether a fare exists is only ever answered from
 parsed site data.
@@ -157,7 +157,7 @@ def handle(message, chat_id, hits=None, broken=None, tally=None):
     low = text.lower()
     hits, broken = hits or [], broken or []
 
-    # 1. deterministic first - must survive Groq being unavailable
+    # 1. deterministic first - must survive Mistral being unavailable
     if wants_report(low):
         return live_report(watchspec.load_all(chat_id), hits, broken)
 
@@ -169,7 +169,7 @@ def handle(message, chat_id, hits=None, broken=None, tally=None):
                 % "; ".join(pretty_spec(w) for w in stopped))
 
     if not llm.available():
-        return ("I only understand keywords right now (no GROQ_API_KEY set): "
+        return ("I only understand keywords right now (no MISTRAL_API_KEY set): "
                 "say report, status, check, update or cancel.")
 
     # 2. the model works out intent

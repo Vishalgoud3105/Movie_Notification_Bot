@@ -3,7 +3,7 @@
 Routing order matters and is deliberate:
 
   1. Deterministic keywords first (report/status/check/...). These must work
-     when Groq is down, out of credit, or slow - they are how you find out
+     when Mistral is down, out of credit, or slow - they are how you find out
      whether the watcher is alive, so they can never depend on a model.
   2. Then the LLM, for setting up a watch, changing one, cancelling, or just
      talking.
@@ -145,7 +145,7 @@ def handle(message, chat_id, hits, broken, bookable, tally=None):
     low = text.lower()
     facts = _facts(chat_id, hits, broken, bookable, tally)
 
-    # 1. deterministic first - these must survive Groq being unavailable
+    # 1. deterministic first - these must survive Mistral being unavailable
     if wants_report(low):
         return live_report(hits, broken, bookable, chat_id,
                            checks=(tally or {}).get("checks", 1))
@@ -158,7 +158,7 @@ def handle(message, chat_id, hits, broken, bookable, tally=None):
                 % "; ".join(pretty_spec(w) for w in stopped))
 
     if not llm.available():
-        return ("I only understand keywords right now (no GROQ_API_KEY set): "
+        return ("I only understand keywords right now (no MISTRAL_API_KEY set): "
                 "say report, status, check, update or cancel.")
 
     # 2. the model works out intent

@@ -6,7 +6,7 @@ import random
 from .config import *
 
 # Rotated rather than hardcoded to one film: these back the idle/fallback
-# replies, which must work with Groq down (see brain.py's routing order) and
+# replies, which must work with Mistral down (see brain.py's routing order) and
 # so can't be LLM-phrased like onboarding.py's welcome message is - but
 # always showing the same Spider-Man example read as a canned template.
 _EXAMPLES = [

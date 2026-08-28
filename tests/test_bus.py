@@ -6,6 +6,7 @@ monkey-patched everywhere a cycle might fire one, so this never touches the
 real bot regardless of what's in .env.
 """
 
+import datetime as dt
 import os
 import sys
 import tempfile
@@ -15,6 +16,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from watcher.bus import runner as bus_runner
 from watcher.bus import watchspec
 from watcher.telegram import wants_report
+
+
+def _future(days_ahead=30):
+    """A travel date safely in the future, for any test that actually drives
+    run_cycle_bus() (which auto-expires a watch whose date has passed) - a
+    hardcoded "future" date rots as real time passes it. Bit us once: a
+    fixture pinned to "20260820" quietly became a past date and every such
+    test started silently expiring its own watch instead of scanning it."""
+    return (dt.datetime.now() + dt.timedelta(days=days_ahead)).strftime("%Y%m%d")
+
+
+def _future_iso(days_ahead=30):
+    """Same as _future() but "YYYY-MM-DD", the shape brain._apply_new_watch()
+    takes directly (bypassing the LLM's extraction)."""
+    return (dt.datetime.now() + dt.timedelta(days=days_ahead)).strftime("%Y-%m-%d")
 
 
 def demo():
@@ -107,8 +123,9 @@ def _demo_run_cycle(sent):
     from watcher.bus import sources
 
     state = {"shift": None}
+    travel_date = _future()
     spec = watchspec.start({"from_city": "hyderabad", "to_city": "bangalore",
-                            "date": "20260820", "target_price": None})
+                            "date": travel_date, "target_price": None})
     wid = spec["id"]
 
     fake_hits = [
@@ -139,7 +156,7 @@ def _demo_run_cycle(sent):
         # a target price is added (same id - a modify, not a new watch) -> met
         # immediately -> one alert, then the watch ends
         watchspec.start({"id": wid, "from_city": "hyderabad", "to_city": "bangalore",
-                         "date": "20260820", "target_price": 650})
+                         "date": travel_date, "target_price": 650})
         sources.scan = lambda *a, **k: ([{"operator": "SRS", "price": 600,
                                           "seat_type": "seater", "source": "abhibus"}], [])
         bus_runner.run_cycle_bus(state)
@@ -175,7 +192,7 @@ def _demo_stale_status():
 
     try:
         route16 = watchspec.start({"from_city": "hyderabad", "to_city": "nellore",
-                                   "date": "20260816", "target_price": None})
+                                   "date": _future(16), "target_price": None})
         sources.scan = lambda *a, **k: ([{"operator": "Old Route Bus", "price": 999,
                                           "seat_type": "seater", "source": "abhibus",
                                           "rating": 4.5, "no_of_ratings": 30}], [])
@@ -187,7 +204,7 @@ def _demo_stale_status():
         # for the 16th (exactly the gap between scheduled scans in --serve)
         watchspec.finish(route16["id"], "cancelled")
         watchspec.start({"from_city": "hyderabad", "to_city": "nellore",
-                         "date": "20260814", "target_price": None})
+                         "date": _future(14), "target_price": None})
 
         reply = live_report(watchspec.load_all(), hits, broken)
         assert "999" not in reply, \
@@ -314,7 +331,7 @@ def _demo_router():
         # bug fix: a chat-tagged watch owned by chat 999 must not make an
         # UNRELATED chat's bare "status" route to bus - ambiguous routing is
         # chat-scoped the same way the watch data itself is. Neither domain
-        # active for chat 42 -> falls through to the Groq-unavailable default.
+        # active for chat 42 -> falls through to the Mistral-unavailable default.
         from watcher import llm
         real_available, llm.available = llm.available, lambda: False
         watchspec.start({"from_city": "c", "to_city": "d", "date": "20260820",
@@ -325,7 +342,7 @@ def _demo_router():
         llm.available = real_available
         watchspec.finish(None, "cancelled")
 
-        # neither active, Groq unreachable in this offline test -> falls back to movie
+        # neither active, Mistral unreachable in this offline test -> falls back to movie
         real_available, llm.available = llm.available, lambda: False
         assert router.classify("status") == ["movie"]
         llm.available = real_available
@@ -347,23 +364,24 @@ def _demo_refuse_unresolvable():
 
     real_resolve = abhibus.resolve
     chat_id = 111
+    travel_date = _future_iso()
     try:
         abhibus.resolve = lambda name: (None, "no-direct-hub")
         msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "amalapuram",
-                                      "date": "2026-08-20"}, chat_id)
+                                      "date": travel_date}, chat_id)
         assert "doesn't sell direct tickets" in msg, msg
         assert watchspec.load() is None, "a refused route must never start a watch"
 
         abhibus.resolve = lambda name: (None, "not-found")
         msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "zzzznotreal",
-                                      "date": "2026-08-20"}, chat_id)
+                                      "date": travel_date}, chat_id)
         assert "couldn't find" in msg.lower(), msg
         assert watchspec.load() is None
 
         # a transient failure (id=None, note=None) must NOT block starting the watch
         abhibus.resolve = lambda name: (None, None)
         msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "bangalore",
-                                      "date": "2026-08-20"}, chat_id)
+                                      "date": travel_date}, chat_id)
         assert "Watching" in msg, msg
         assert watchspec.load() is not None, \
             "a transient validation failure must not block starting the watch"
@@ -372,7 +390,7 @@ def _demo_refuse_unresolvable():
         # a real match proceeds normally
         abhibus.resolve = lambda name: (7, None)
         msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "bangalore",
-                                      "date": "2026-08-20"}, chat_id)
+                                      "date": travel_date}, chat_id)
         assert "Watching" in msg, msg
         watchspec.finish(None, "cancelled")
 
@@ -380,7 +398,7 @@ def _demo_refuse_unresolvable():
         # LLM hallucinated as text must all be refused before ever touching
         # AbhiBus or starting a dead/broken watch
         msg = brain._apply_new_watch({"from_city": "Hyderabad", "to_city": "hyderabad",
-                                      "date": "2026-08-20"}, chat_id)
+                                      "date": travel_date}, chat_id)
         assert "same city" in msg.lower(), msg
         assert watchspec.load() is None
 
@@ -390,7 +408,7 @@ def _demo_refuse_unresolvable():
         assert watchspec.load() is None
 
         msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "bangalore",
-                                      "date": "2026-08-20", "target_price": "cheap please"}, chat_id)
+                                      "date": travel_date, "target_price": "cheap please"}, chat_id)
         assert "didn't understand" in msg.lower(), msg
         assert watchspec.load() is None
     finally:
@@ -414,10 +432,10 @@ def _demo_chat_scoping():
 
     try:
         owner_watch = watchspec.start({"from_city": "hyderabad", "to_city": "bangalore",
-                                       "date": "20260820", "target_price": None,
+                                       "date": _future(20), "target_price": None,
                                        "chat_id": OWNER})
         group_watch = watchspec.start({"from_city": "chennai", "to_city": "pune",
-                                       "date": "20260821", "target_price": None,
+                                       "date": _future(21), "target_price": None,
                                        "chat_id": GROUP})
 
         # (2) status: each chat sees only its own route

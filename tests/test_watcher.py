@@ -155,7 +155,7 @@ def demo_group_chats():
     os.environ["TELEGRAM_API_TOKEN"] = "x"
 
     real_welcome = onboarding.welcome_message
-    onboarding.welcome_message = lambda: "welcome text"   # no real Groq call
+    onboarding.welcome_message = lambda: "welcome text"   # no real LLM call
 
     sent_to = []
     pending = []
@@ -327,7 +327,7 @@ if __name__ == "__main__":
 
 
 def demo_brain():
-    """Routing and the watch lifecycle - all offline, no Groq, no network."""
+    """Routing and the watch lifecycle - all offline, no LLM, no network."""
     import tempfile
     from watcher import llm
     from watcher.movies import brain, search, watchspec

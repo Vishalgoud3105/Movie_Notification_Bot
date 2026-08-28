@@ -1,4 +1,4 @@
-"""Prompts for the Groq LLM, bus domain. Mirrors watcher/movies/prompt_template.py.
+"""Prompts for the Mistral LLM, bus domain. Mirrors watcher/movies/prompt_template.py.
 
 Same two jobs: turn a sentence into a watch spec, and talk like a human about
 what the watcher is doing. Never asked whether a fare exists - that answer

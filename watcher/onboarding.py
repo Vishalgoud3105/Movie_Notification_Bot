@@ -3,7 +3,7 @@
 Generated fresh via the LLM each time, not a canned template - varied
 wording every time, grounded in whatever is actually being watched right
 now rather than always the same hardcoded route/movie. Falls back to a
-static message if Groq is unavailable, same as every other LLM use in this
+static message if Mistral is unavailable, same as every other LLM use in this
 project: never a dependency of anything the bot actually has to do.
 
 Kept separate from telegram.py (pure transport) and each domain's own
@@ -60,7 +60,7 @@ _FALLBACK = "\n".join([
 
 
 def welcome_message():
-    """A fresh, LLM-phrased introduction, or a static fallback if Groq is down."""
+    """A fresh, LLM-phrased introduction, or a static fallback if Mistral is down."""
     from . import llm
     from .bus import watchspec as bus_watchspec
     from .movies import watchspec as movie_watchspec

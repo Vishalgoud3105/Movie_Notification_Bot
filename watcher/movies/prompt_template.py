@@ -1,4 +1,4 @@
-"""Prompts for the Groq LLM.
+"""Prompts for the Mistral LLM.
 
 The model has exactly two jobs: turn a sentence into a watch spec, and talk
 like a human about what the watcher is doing. It is never asked whether shows

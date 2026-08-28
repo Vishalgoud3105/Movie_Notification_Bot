@@ -2,7 +2,7 @@
 
 import os
 
-from ..config import *   # HOME_CITY, GROQ_MODEL, SCAN_EVERY, LONG_POLL, IST, SHIFTS...
+from ..config import *   # HOME_CITY, MISTRAL_MODEL, SCAN_EVERY, LONG_POLL, IST, SHIFTS...
 
 
 # Both verified to return identical payloads. If BMS retires one, the other is

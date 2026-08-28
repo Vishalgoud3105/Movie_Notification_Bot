@@ -1,12 +1,19 @@
-"""Groq (llama-3.3-70b) for understanding messages and phrasing replies.
+"""Mistral (mistral-medium-latest by default) for understanding messages and
+phrasing replies.
 
-Deliberately thin: Groq speaks the OpenAI chat-completions shape, so `requests`
-is enough and the project keeps its single dependency.
+Was Groq until 29 Aug 2026 - switched providers after Groq deprecated
+llama-3.3-70b-versatile and its suggested replacement (openai/gpt-oss-120b)
+turned out to be a reasoning model, burning tokens on hidden reasoning before
+any visible output - see config.py's MISTRAL_MODEL comment and
+[[project-bms-gotchas]].
 
-Every entry point degrades to None/False rather than raising. If Groq is down,
-misconfigured or slow, the watcher must keep watching and keep answering the
-deterministic keyword commands - the LLM is a convenience layer, never a
-dependency of the alert path.
+Deliberately thin: Mistral speaks the OpenAI chat-completions shape, so
+`requests` is enough and the project keeps its single dependency.
+
+Every entry point degrades to None/False rather than raising. If Mistral is
+down, misconfigured or slow, the watcher must keep watching and keep
+answering the deterministic keyword commands - the LLM is a convenience
+layer, never a dependency of the alert path.
 
 Shared by every domain: the prompt text is what differs (movie vs bus vs
 whatever comes next), not this calling code, so extract()/chat()/troubleshoot()
@@ -25,21 +32,21 @@ from .config import *
 from .movies.prompt_template import (CHAT_SYSTEM, CHAT_USER, EXTRACT_SYSTEM,
                                      EXTRACT_USER, TROUBLESHOOT_SYSTEM)
 
-API = "https://api.groq.com/openai/v1/chat/completions"
+API = "https://api.mistral.ai/v1/chat/completions"
 
 
 def available():
     """True if a key is configured. Never logs or returns the key itself."""
-    return bool(os.environ.get("GROQ_API_KEY"))
+    return bool(os.environ.get("MISTRAL_API_KEY"))
 
 
 def _call(messages, temperature=0.4, json_mode=False, max_tokens=700):
     """One chat completion, or None on any failure."""
-    key = os.environ.get("GROQ_API_KEY")
+    key = os.environ.get("MISTRAL_API_KEY")
     if not key:
         return None
     body = {
-        "model": GROQ_MODEL,
+        "model": MISTRAL_MODEL,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -54,11 +61,11 @@ def _call(messages, temperature=0.4, json_mode=False, max_tokens=700):
             if r.status_code == 200:
                 return r.json()["choices"][0]["message"]["content"].strip()
             # 401/400 will not fix themselves; 429/5xx might
-            print("groq HTTP %s: %s" % (r.status_code, r.text[:160]))
+            print("mistral HTTP %s: %s" % (r.status_code, r.text[:160]))
             if r.status_code in (400, 401, 403, 404):
                 return None
         except (requests.RequestException, ValueError, KeyError) as e:
-            print("groq call failed (attempt %d): %s" % (attempt + 1, e))
+            print("mistral call failed (attempt %d): %s" % (attempt + 1, e))
         time.sleep(2 * (attempt + 1))
     return None
 
@@ -120,7 +127,7 @@ def classify_domain(message):
 
     A single cheap classification call, used by router.py only when keyword
     matching and "one active watch" both come up empty. Never guesses when
-    Groq is unavailable - the caller falls back to movie, today's only
+    Mistral is unavailable - the caller falls back to movie, today's only
     established default.
     """
     out = _call(
