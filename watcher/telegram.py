@@ -4,11 +4,31 @@ Pure transport, shared by every domain - no domain knows about movies, buses
 or anything else. Dispatching a reply to the right domain's brain is
 watcher/router.py's job, not this module's.
 
-Broadcasts to multiple chats at once: the owner's personal DM (from
-TELEGRAM_CHAT_ID in .env, permanent, never removable) plus any group chats
-the owner has since added the bot to. Commands are accepted from any of them
-and route to the same shared watch - this is meant for "watch this with me",
-not per-chat isolated watches.
+Two different trust models, on purpose:
+
+- Group chats: owner-only adoption. Only the owner may add the bot to a
+  group (_chat_membership_events()) - a random person adding it to their own
+  group is a real abuse vector (redirects alerts, costs scan cycles, opens
+  the bot to strangers the owner never chose), so it is refused. A group,
+  once adopted, is in the broadcast list (known_chats.json) - shift reports
+  and any chat_id-less legacy alert reach it, matching the original "watch
+  this together" design.
+- Individual/private 1:1 chats: open to anyone, dynamically, no adoption
+  needed (added 16 Aug 2026, after a live-reported bug: a friend's DM to the
+  bot got zero response, while the owner's own DM and an adopted group both
+  worked - poll_commands() was silently dropping every message from a chat
+  it didn't already know). A stranger DMing the bot only affects themselves,
+  the same trust boundary as any public bot - not the group-abuse case
+  above. Each domain's chat-scoping (watchspec.load_all(chat_id) etc.)
+  already makes their own watch alerts reach them correctly via reply_to(),
+  which has no known-chats gate. Private chats are deliberately NEVER added
+  to the broadcast list - shift reports summarize every active route/movie
+  across every user, and broadcasting that to every stranger who ever typed
+  one message would leak other users' watches to people who have nothing to
+  do with them.
+
+The owner's personal DM (TELEGRAM_CHAT_ID in .env) is permanent and never
+removable either way, and is the only identity allowed to adopt a group.
 """
 
 import json
@@ -20,6 +40,11 @@ import requests
 from .config import *
 
 KNOWN_CHATS_FILE = os.environ.get("KNOWN_CHATS_FILE", "known_chats.json")
+# Private chats already sent the one-time welcome - separate from
+# KNOWN_CHATS_FILE on purpose: that file means "broadcast target", this one
+# means "already greeted", and conflating them would put private chats on
+# the broadcast list by accident.
+GREETED_PRIVATE_FILE = os.environ.get("GREETED_PRIVATE_FILE", "greeted_private.json")
 
 
 def _owner_id():
@@ -58,6 +83,24 @@ def _save_extra_chats(chats):
     with open(tmp, "w") as f:
         json.dump({"chats": sorted(c for c in chats if c != owner)}, f)
     os.replace(tmp, KNOWN_CHATS_FILE)
+
+
+def _load_greeted_private():
+    """Private chat ids that already got the one-time welcome message."""
+    if not os.path.exists(GREETED_PRIVATE_FILE):
+        return set()
+    try:
+        with open(GREETED_PRIVATE_FILE) as f:
+            return {str(c) for c in json.load(f).get("chats", [])}
+    except (ValueError, OSError):
+        return set()
+
+
+def _save_greeted_private(chats):
+    tmp = GREETED_PRIVATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"chats": sorted(chats)}, f)
+    os.replace(tmp, GREETED_PRIVATE_FILE)
 
 
 def _chat_membership_events(updates):
@@ -150,7 +193,8 @@ def send_telegram(text):
 
 
 def poll_commands(state, wait=0):
-    """Read anything typed to the bot, from any known chat.
+    """Read anything typed to the bot, from any known chat OR any individual
+    DM (see the module docstring for the two different trust models).
 
     Returns a list of (chat_id, text) pairs, not bare text - callers need the
     chat id to reply only where the command came from (reply_to()), not
@@ -206,16 +250,33 @@ def poll_commands(state, wait=0):
         _save_extra_chats(current)
         chats = current
 
+    greeted = _load_greeted_private()
+    newly_greeted = set()
     commands = []
     for u in updates:
         state["tg_offset"] = u["update_id"] + 1      # ack, so it is not replayed
         msg = u.get("message") or u.get("edited_message") or {}
-        chat_id = (msg.get("chat") or {}).get("id")
-        if str(chat_id) not in chats:
-            continue                                  # not a known chat - ignore
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        is_private = chat.get("type") == "private"
+        if str(chat_id) not in chats and not is_private:
+            continue                                  # not a known chat, not a DM - ignore
+
+        if is_private and str(chat_id) not in chats and str(chat_id) not in greeted:
+            # first-ever message from this individual - same intro a newly
+            # adopted group gets, so a friend's first contact isn't raw
+            # fallback text. Never added to `chats` (the broadcast list) -
+            # see the module docstring for why.
+            from . import onboarding
+            _send_one(token, str(chat_id), onboarding.welcome_message())
+            newly_greeted.add(str(chat_id))
+
         text = (msg.get("text") or "").strip().lower().lstrip("/")
         if text:
             commands.append((chat_id, text.replace("@", " ")))
+
+    if newly_greeted:
+        _save_greeted_private(greeted | newly_greeted)
     return commands
 
 

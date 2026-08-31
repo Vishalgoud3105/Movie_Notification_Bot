@@ -125,6 +125,7 @@ def demo():
     demo_brain()
     demo_movie_chat_scoping()
     demo_group_chats()
+    demo_private_chats()
 
     # blank filters = report everything. Explicitly reset every field
     # shows_for() reads, not just FORMAT/LANGUAGE/VENUES - demo_brain()'s
@@ -220,6 +221,106 @@ def demo_group_chats():
         if os.path.exists(telegram.KNOWN_CHATS_FILE):
             os.remove(telegram.KNOWN_CHATS_FILE)
         telegram.KNOWN_CHATS_FILE = keep_file
+        if keep_chat is not None:
+            os.environ["TELEGRAM_CHAT_ID"] = keep_chat
+        else:
+            os.environ.pop("TELEGRAM_CHAT_ID", None)
+        if keep_token is not None:
+            os.environ["TELEGRAM_API_TOKEN"] = keep_token
+
+
+def demo_private_chats():
+    """Individual DMs get dynamic responses without prior adoption (bug fix,
+    16 Aug 2026 - a friend's DM got zero response while the owner's own DM
+    and an adopted group both worked; poll_commands() was silently dropping
+    any chat it didn't already know). Group adoption stays owner-only,
+    unchanged - covered already by demo_group_chats(); this covers the new
+    private-chat path plus that the two don't bleed into each other."""
+    import tempfile
+    from watcher import onboarding
+
+    keep_known = telegram.KNOWN_CHATS_FILE
+    keep_greeted = telegram.GREETED_PRIVATE_FILE
+    telegram.KNOWN_CHATS_FILE = os.path.join(tempfile.gettempdir(), "_known_chats_test2.json")
+    telegram.GREETED_PRIVATE_FILE = os.path.join(tempfile.gettempdir(), "_greeted_private_test.json")
+    for f in (telegram.KNOWN_CHATS_FILE, telegram.GREETED_PRIVATE_FILE):
+        if os.path.exists(f):
+            os.remove(f)
+
+    keep_chat = os.environ.get("TELEGRAM_CHAT_ID")
+    keep_token = os.environ.get("TELEGRAM_API_TOKEN")
+    os.environ["TELEGRAM_CHAT_ID"] = "111"          # the owner's own chat
+    os.environ["TELEGRAM_API_TOKEN"] = "x"
+
+    real_welcome = onboarding.welcome_message
+    onboarding.welcome_message = lambda: "welcome text"
+
+    sent_to = []
+    pending = []
+    real_post = telegram.requests.post
+
+    def fake_post(url, json=None, **kw):
+        if "sendMessage" in url:
+            sent_to.append(json["chat_id"])
+            return type("R", (), {"status_code": 200, "text": "",
+                                  "json": staticmethod(lambda: {})})()
+        return type("R", (), {"status_code": 200,
+                    "json": staticmethod(lambda: {"result": pending})})()
+
+    telegram.requests.post = fake_post
+
+    def dm(chat_id, text, update_id):
+        return {"update_id": update_id, "message": {
+            "chat": {"id": chat_id, "type": "private"}, "text": text}}
+
+    try:
+        st = {"tg_offset": 0}
+
+        # 1. the owner's own DM still works exactly as before (chat 111,
+        # already "known" via TELEGRAM_CHAT_ID - not the new code path at all)
+        pending = [dm(111, "status", 1)]
+        assert poll_commands(st) == [(111, "status")]
+        assert sent_to == [], "the owner is already known - no welcome expected"
+
+        # 2. a brand-new stranger's DM is accepted (the actual bug fix) and
+        # gets welcomed on this, its first-ever message
+        pending = [dm(222, "hello", 2)]
+        assert poll_commands(st) == [(222, "hello")], \
+            "a private chat's message must never be silently dropped"
+        assert sent_to == ["222"], "first contact from a new private chat must be welcomed"
+
+        # 3. that same stranger's SECOND message must not re-welcome them
+        sent_to.clear()
+        pending = [dm(222, "status", 3)]
+        assert poll_commands(st) == [(222, "status")]
+        assert sent_to == [], "must not welcome the same private chat twice"
+
+        # 4. a private chat is NEVER added to the broadcast list, no matter
+        # how many messages it sends - shift reports must not leak to it
+        assert "222" not in telegram._load_known_chats(), \
+            "a private DM chat must never become a broadcast target"
+        sent_to.clear()
+        telegram.send_telegram("shift report text")
+        assert "222" not in sent_to, "broadcast must not reach a private-chat stranger"
+
+        # 5. group adoption is still owner-only - a non-owner adding the bot
+        # to a group must still be ignored (regression check, not the new path)
+        sent_to.clear()
+        pending = [{"update_id": 6, "my_chat_member": {
+            "chat": {"id": -900, "type": "group"}, "from": {"id": 999},
+            "new_chat_member": {"status": "member"}}}]
+        poll_commands(st)
+        assert "-900" not in telegram._load_known_chats(), \
+            "a non-owner group add must still be refused after this change"
+        assert sent_to == [], "must not welcome an unauthorized group"
+    finally:
+        telegram.requests.post = real_post
+        onboarding.welcome_message = real_welcome
+        for f in (telegram.KNOWN_CHATS_FILE, telegram.GREETED_PRIVATE_FILE):
+            if os.path.exists(f):
+                os.remove(f)
+        telegram.KNOWN_CHATS_FILE = keep_known
+        telegram.GREETED_PRIVATE_FILE = keep_greeted
         if keep_chat is not None:
             os.environ["TELEGRAM_CHAT_ID"] = keep_chat
         else:

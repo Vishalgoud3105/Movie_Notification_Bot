@@ -31,3 +31,7 @@ Project_Docs/
 *API*KEY*
 # Runtime watch set from chat, like seen.json
 watch.json
+watch_bus.json
+seen_bus.json
+known_chats.json
+greeted_private.json
