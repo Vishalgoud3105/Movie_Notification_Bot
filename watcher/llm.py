@@ -122,6 +122,67 @@ def troubleshoot(message, facts, system=TROUBLESHOOT_SYSTEM):
         temperature=0.3, max_tokens=400)
 
 
+def _masked(value):
+    """First/last 4 chars only, length shown - enough to eyeball-compare
+    against the console without ever printing the real secret. A length or
+    prefix/suffix mismatch against what you see on console.mistral.ai is
+    itself the finding (stale key, partial paste, wrong line edited)."""
+    if not value:
+        return "(not set)"
+    if len(value) <= 10:
+        return "*" * len(value) + " (%d chars - looks too short for a real key)" % len(value)
+    return "%s...%s (%d chars)" % (value[:4], value[-4:], len(value))
+
+
+def diagnose():
+    """Print what this process actually sees for the LLM config, then make
+    one real API call and show Mistral's raw response - for verifying a
+    deploy's .env without ever exposing the real key. See watch.py
+    --diagnose-llm. Never send this output anywhere but your own terminal -
+    the masked key is safe to look at, but no need to paste it elsewhere.
+
+    Note: .env only fills in names the environment doesn't already have
+    (see config.py's loader, `os.environ.setdefault`) - if MISTRAL_API_KEY
+    is also exported some other way (shell profile, systemd Environment=,
+    ...), THAT wins over .env silently. Confirmed the shipped
+    deploy/watcher.service has no such override as of 25 Sep 2026, but a
+    hand-edited unit or shell profile could still do this.
+    """
+    print("config.DOTENV: %s" % DOTENV)
+    print("  exists: %s" % os.path.exists(DOTENV))
+    key = os.environ.get("MISTRAL_API_KEY")
+    print("MISTRAL_API_KEY: %s" % _masked(key))
+    print("MISTRAL_MODEL: %s" % MISTRAL_MODEL)
+    print("API endpoint: %s" % API)
+    if not key:
+        print("\nNo key at all - available() is False, the bot is running "
+              "keyword-only. Nothing further to test.")
+        return
+
+    print("\nMaking one real test call...")
+    try:
+        r = requests.post(API, json={"model": MISTRAL_MODEL, "max_tokens": 5,
+                                     "messages": [{"role": "user", "content": "say hi"}]},
+                          timeout=30, headers={"Authorization": "Bearer %s" % key})
+        print("HTTP status: %s" % r.status_code)
+        print("response body: %s" % r.text[:400])
+        if r.status_code == 200:
+            print("\n-> Mistral is reachable and this key/model works right now.")
+        elif r.status_code == 401:
+            print("\n-> The key itself is being rejected - regenerate it on "
+                  "console.mistral.ai and update .env, this key won't start working on its own.")
+        elif r.status_code == 429:
+            print("\n-> Rate-limited right now - check console.mistral.ai's "
+                  "usage page for the actual limit/reset time, this may "
+                  "resolve on its own shortly.")
+        else:
+            print("\n-> Unexpected status - see the response body above for what Mistral said.")
+    except requests.RequestException as e:
+        print("request failed outright: %s" % e)
+        print("-> this VM may not be able to reach api.mistral.ai at all "
+              "(DNS/firewall/outbound block) - try: curl -I https://api.mistral.ai")
+
+
 def classify_domain(message):
     """Which domain (\"movie\" | \"bus\") a chat message is about, or None.
 

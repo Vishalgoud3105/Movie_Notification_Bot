@@ -15,6 +15,8 @@ Usage:
   python watch.py --test      send a test message + preview of the real alert (movies only)
   python watch.py --report    status report right now (movies only)
   python watch.py --selftest  offline logic checks, no network
+  python watch.py --diagnose-llm   prints masked LLM config + one real test
+                                    call's raw response, never the real key
 
 Settings live in watcher/config.py (shared) plus watcher/movies/config.py and
 watcher/bus/config.py, overridable via .env or the environment.
@@ -34,6 +36,9 @@ if __name__ == "__main__":
         test_run()
     elif "--report" in sys.argv:
         report_now()
+    elif "--diagnose-llm" in sys.argv:
+        from watcher.llm import diagnose
+        diagnose()
     elif "--serve" in sys.argv:
         serve()
     else:
