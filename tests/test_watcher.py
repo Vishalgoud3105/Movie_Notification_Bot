@@ -447,6 +447,30 @@ def demo_brain():
     reply = brain.handle("status", chat_id, {"20260808": []}, [], "20260813")
     assert reply.startswith("📋") or reply.startswith("😴"), \
         "status must be answered from data, not the model: %r" % reply
+    llm.available = real_available
+
+    # bug fix, reported live 25 Sep 2026: Mistral rate-limited mid-conversation
+    # (llm._call() returns None on any failure, including a real 429), and
+    # the old fallback message ("I didn't catch that... describe what to
+    # watch") read as "your phrasing is wrong", which drove retyping the same
+    # request over and over - each retry burning another call against the
+    # very rate limit that was already the problem. When the LLM is available
+    # but genuinely returns nothing, the reply must say so honestly and point
+    # at the keyword commands, not blame the user's wording.
+    real_llm_available = llm.available
+    real_extract, real_chat = llm.extract, llm.chat
+    llm.available = lambda: True
+    llm.extract = lambda *a, **k: None
+    llm.chat = lambda *a, **k: None
+    try:
+        reply = brain.handle("watch something good", chat_id, {}, [], None)
+        assert "trouble reaching" in reply.lower(), reply
+        assert "describe what to watch" not in reply.lower(), \
+            "must not blame the user's phrasing when the LLM itself failed: %r" % reply
+        assert "status" in reply.lower() and "cancel" in reply.lower(), \
+            "must point at the keyword commands that still work: %r" % reply
+    finally:
+        llm.available, llm.extract, llm.chat = real_llm_available, real_extract, real_chat
 
     # a title that does not exist is refused, never turned into a dead URL
     real_find, search.find = search.find, lambda *a, **k: None

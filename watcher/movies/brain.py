@@ -197,5 +197,19 @@ def handle(message, chat_id, hits, broken, bookable, tally=None):
     else:
         reply = llm.chat(text, facts)
 
-    return reply or ("I didn't catch that. Say \"status\" for a report, or "
-                     "describe what to watch, e.g. \"%s\"." % example_watch_phrase())
+    if reply:
+        return reply
+    # Reached only once llm.available() already confirmed a key is set (see
+    # the branch above), so a genuinely empty reply here almost always means
+    # the LLM call itself failed this round (network hiccup, rate limit,
+    # outage) - not that the wording was unparseable. The old message here
+    # said "I didn't catch that... describe what to watch", which reads as
+    # "your phrasing was wrong" and invites exactly the wrong fix: retyping
+    # the same request over and over, each retry burning another call against
+    # whatever just failed (a rate limit gets WORSE from repeated retries,
+    # confirmed live - see [[project-bms-gotchas]]). Keyword commands never
+    # touch the LLM at all, so point at those as the thing that will
+    # definitely still work right now.
+    return ("Having trouble reaching my AI brain right now - try again in a "
+            "bit. \"status\"/\"cancel\" always work regardless, they don't "
+            "need it.")

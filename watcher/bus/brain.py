@@ -209,7 +209,18 @@ def handle(message, chat_id, hits=None, broken=None, tally=None):
     else:
         reply = llm.chat(text, facts, owner_context=OWNER_CONTEXT, system=CHAT_SYSTEM)
 
-    return reply or ("I didn't catch that. Say \"status\" for a report, or "
-                     "describe a route, e.g. \"watch bus from Hyderabad to "
-                     "Bangalore on 20 Aug, notify under 800\".")
+    if reply:
+        return reply
+    # Reached only once llm.available() already confirmed a key is set (see
+    # the branch above), so a genuinely empty reply here almost always means
+    # the LLM call itself failed this round (network hiccup, rate limit,
+    # outage) - not that the wording was unparseable. See
+    # watcher/movies/brain.py's identical fix for the full reasoning: the old
+    # message here read as "your phrasing was wrong" and invited retrying the
+    # same request over and over, each retry burning another call against
+    # whatever just failed - confirmed live to make a rate limit worse, not
+    # better. Keyword commands never touch the LLM, so point at those.
+    return ("Having trouble reaching my AI brain right now - try again in a "
+            "bit. \"status\"/\"cancel\" always work regardless, they don't "
+            "need it.")
 

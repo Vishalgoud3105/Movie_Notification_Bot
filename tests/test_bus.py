@@ -50,6 +50,7 @@ def demo():
         _demo_seat_filtering()
         _demo_quality_and_govt_filter()
         _demo_chat_scoping()
+        _demo_llm_outage_fallback()
     finally:
         if os.path.exists(watchspec.WATCH_FILE):
             os.remove(watchspec.WATCH_FILE)
@@ -549,6 +550,32 @@ def _demo_seat_filtering():
 
     assert abhibus._cheapest_matching_seat(seats, gender=None, seat_type=None)["seat_no"] == "UD1", \
         "no filter at all -> cheapest available seat overall (UD1 @900, cheaper than LD5 @1200)"
+
+
+def _demo_llm_outage_fallback():
+    """Bug fix, reported live 25 Sep 2026: Mistral rate-limited mid-
+    conversation (llm._call() returns None on any failure, incl. a real
+    429), and the old fallback ("I didn't catch that... describe a route")
+    read as "your phrasing is wrong", driving retries that just burned more
+    calls against the same rate limit. When the LLM is available but
+    genuinely returns nothing, the reply must say so and point at the
+    keyword commands - mirrors watcher/movies/brain.py's identical fix."""
+    from watcher import llm
+    from watcher.bus import brain
+
+    real_available, real_extract, real_chat = llm.available, llm.extract, llm.chat
+    llm.available = lambda: True
+    llm.extract = lambda *a, **k: None
+    llm.chat = lambda *a, **k: None
+    try:
+        reply = brain.handle("watch something good", 999)
+        assert "trouble reaching" in reply.lower(), reply
+        assert "describe a route" not in reply.lower(), \
+            "must not blame the user's phrasing when the LLM itself failed: %r" % reply
+        assert "status" in reply.lower() and "cancel" in reply.lower(), \
+            "must point at the keyword commands that still work: %r" % reply
+    finally:
+        llm.available, llm.extract, llm.chat = real_available, real_extract, real_chat
 
 
 if __name__ == "__main__":
