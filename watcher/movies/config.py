@@ -14,22 +14,29 @@ ENDPOINTS = [
 ]
 
 
-# MUST be the 4DX 3D child code, not the parent ET00447840. Verified: the parent
-# query returns only English 2D shows - the 4DX shows are invisible from it.
-# Each format is its own event as far as this API is concerned.
+# EVENT_CODE / REGION_CODE / MOVIE_SLUG are read ONLY by the BookMyShow reader
+# (bms.py, SOURCE=bms) - unused with the default SOURCE=district, and BMS 403s
+# every datacenter IP anyway. They stay a single fixed movie, not per-watch.
+# EVENT_CODE must be the 4DX 3D child code, not the parent ET00447840: the
+# parent query returns only English 2D shows (each format is its own event).
 EVENT_CODE = os.environ.get("EVENT_CODE", "ET00502630")
 
 
 REGION_CODE = os.environ.get("REGION_CODE", "HYD")
 
 
-DATES = [d.strip() for d in os.environ.get("DATES", "20260808,20260809").split(",") if d.strip()]
+# DATES / TIME_FROM / TIME_TO / VENUES / FORMAT / LANGUAGE are PER-WATCH values:
+# watchspec._push() overwrites them from each chat-set watch before every scan,
+# so what is written here never reaches a real watch. Defaults are deliberately
+# neutral (no dates, whole day, any venue/format/language) - they only feed the
+# manual `python watch.py --test` probe, which an .env value can still override.
+DATES = [d.strip() for d in os.environ.get("DATES", "").split(",") if d.strip()]
 
 
-TIME_FROM = os.environ.get("TIME_FROM", "06:00")
+TIME_FROM = os.environ.get("TIME_FROM", "00:00")
 
 
-TIME_TO = os.environ.get("TIME_TO", "20:00")
+TIME_TO = os.environ.get("TIME_TO", "23:59")
 
 
 VENUES = [v.strip().lower() for v in os.environ.get("VENUES", "").split(",") if v.strip()]
@@ -44,14 +51,14 @@ VENUES = [v.strip().lower() for v in os.environ.get("VENUES", "").split(",") if 
 SEAT_CATEGORY = os.environ.get("SEAT_CATEGORY", "").strip().lower()
 
 
-# "4DX 3D" is its own child event (ET00502630 here) and is NOT the same as plain
-# 4DX or 4DX 2D. Matched against the child-event dimension and the venue's show
-# Attributes, with punctuation stripped so "4DX 3D"/"4DX-3D"/"4DX3D" all hit and
-# "4DX 2D" does not. Blank = any.
-FORMAT = os.environ.get("FORMAT", "4DX 3D")
+# Matched against the session's screen format with punctuation stripped, so a
+# watch for "4DX 3D" also hits District's "4DX-3D" but not "4DX 2D" (each
+# format is its own child event on BookMyShow). Blank = any. Per-watch - see
+# the note above DATES.
+FORMAT = os.environ.get("FORMAT", "")
 
 
-LANGUAGE = os.environ.get("LANGUAGE", "English")
+LANGUAGE = os.environ.get("LANGUAGE", "")
 
 
 # Which ticketing site to read. BookMyShow 403s every datacenter IP (verified on
@@ -59,6 +66,8 @@ LANGUAGE = os.environ.get("LANGUAGE", "English")
 # from a server. "bms" still works from a residential connection.
 SOURCE = os.environ.get("SOURCE", "district").strip().lower()
 SITE = "District" if SOURCE == "district" else "BookMyShow"   # for user-facing text
+# DISTRICT_URL / MOVIE_NAME are also per-watch (each chat-set watch resolves its
+# own District page). This default is only the sample movie `--test` probes.
 DISTRICT_URL = os.environ.get(
     "DISTRICT_URL",
     "https://www.district.in/movies/"

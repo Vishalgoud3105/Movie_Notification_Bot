@@ -125,12 +125,17 @@ def format_days(by_date):
 def alert_text(by_date):
     """THE real alert. test_run() renders this verbatim so you see it in advance."""
     n = sum(len(v) for v in by_date.values())
+    # LANGUAGE/FORMAT are this watch's own values (watchspec.apply() ran just
+    # before) and can be blank - build the label from what exists instead of a
+    # fixed template that would print a stray double space. The text used to be
+    # hardcoded for one film ("🕷️" and "4DX sells out fast!" on every alert).
+    label = " ".join(b for b in (LANGUAGE.upper(), FORMAT) if b)
     return "\n".join([
-        "🚨🕷️ IT'S LIVE! %s %s TICKETS ARE OPEN! 🕷️🚨" % (LANGUAGE.upper(), FORMAT),
+        "🚨 IT'S LIVE! %sTICKETS ARE OPEN! 🚨" % (label + " " if label else ""),
         "",
         "🍿 %s" % MOVIE_NAME,
         "🎟️ %d show%s between %s and %s" % (n, "" if n == 1 else "s", TIME_FROM, TIME_TO),
-        "⚡ GO BOOK NOW - 4DX sells out fast!",
+        "⚡ GO BOOK NOW - popular shows sell out fast!",
     ] + format_days(by_date) + ["", "❌ = already sold out"])
 
 
