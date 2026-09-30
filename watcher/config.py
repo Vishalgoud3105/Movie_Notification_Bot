@@ -71,7 +71,7 @@ HOME_CITY = os.environ.get("HOME_CITY", "hyderabad").strip().lower()
 # added, put mistral-medium-latest first via MISTRAL_MODEL.
 MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "ministral-8b-2512")
 MISTRAL_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
-    "MISTRAL_FALLBACK_MODELS", "ministral-8b-2512,ministral-14b-2512").split(",") if m.strip()]
+    "MISTRAL_FALLBACK_MODELS", "ministral-14b-2512").split(",") if m.strip()]
 # MISTRAL_API_KEY is read from the environment at call time, never stored here.
 
 
