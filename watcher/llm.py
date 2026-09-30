@@ -40,13 +40,26 @@ def available():
     return bool(os.environ.get("MISTRAL_API_KEY"))
 
 
+def _models():
+    """Primary first, then the fallbacks, no duplicates."""
+    return list(dict.fromkeys([MISTRAL_MODEL] + MISTRAL_FALLBACK_MODELS))
+
+
 def _call(messages, temperature=0.4, json_mode=False, max_tokens=700):
-    """One chat completion, or None on any failure."""
+    """One chat completion, or None on any failure.
+
+    Walks the model chain (see config.py's MISTRAL_MODEL comment): a free-tier
+    key can have one model throttled (429) or tier-blocked (403) while another
+    works fine, and a single hardcoded model turned that into a total silent
+    outage. Those refusals are per-model and won't clear in seconds, so move
+    straight to the next model - no sleep. A 401 means the KEY is bad, which
+    no model can fix, so stop. Only 5xx/network errors are worth retrying the
+    same model.
+    """
     key = os.environ.get("MISTRAL_API_KEY")
     if not key:
         return None
     body = {
-        "model": MISTRAL_MODEL,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -54,19 +67,22 @@ def _call(messages, temperature=0.4, json_mode=False, max_tokens=700):
     if json_mode:
         body["response_format"] = {"type": "json_object"}
 
-    for attempt in range(3):
-        try:
-            r = requests.post(API, json=body, timeout=45,
-                              headers={"Authorization": "Bearer %s" % key})
-            if r.status_code == 200:
-                return r.json()["choices"][0]["message"]["content"].strip()
-            # 401/400 will not fix themselves; 429/5xx might
-            print("mistral HTTP %s: %s" % (r.status_code, r.text[:160]))
-            if r.status_code in (400, 401, 403, 404):
-                return None
-        except (requests.RequestException, ValueError, KeyError) as e:
-            print("mistral call failed (attempt %d): %s" % (attempt + 1, e))
-        time.sleep(2 * (attempt + 1))
+    for model in _models():
+        body["model"] = model
+        for attempt in range(3):
+            try:
+                r = requests.post(API, json=body, timeout=45,
+                                  headers={"Authorization": "Bearer %s" % key})
+                if r.status_code == 200:
+                    return r.json()["choices"][0]["message"]["content"].strip()
+                print("mistral HTTP %s (%s): %s" % (r.status_code, model, r.text[:160]))
+                if r.status_code == 401:
+                    return None
+                if r.status_code in (400, 403, 404, 429):
+                    break                       # this model won't work now - next one
+            except (requests.RequestException, ValueError, KeyError) as e:
+                print("mistral call failed (%s, attempt %d): %s" % (model, attempt + 1, e))
+            time.sleep(2 * (attempt + 1))
     return None
 
 
@@ -152,35 +168,38 @@ def diagnose():
     print("  exists: %s" % os.path.exists(DOTENV))
     key = os.environ.get("MISTRAL_API_KEY")
     print("MISTRAL_API_KEY: %s" % _masked(key))
-    print("MISTRAL_MODEL: %s" % MISTRAL_MODEL)
+    print("model chain (tried in this order): %s" % " -> ".join(_models()))
     print("API endpoint: %s" % API)
     if not key:
         print("\nNo key at all - available() is False, the bot is running "
               "keyword-only. Nothing further to test.")
         return
 
-    print("\nMaking one real test call...")
-    try:
-        r = requests.post(API, json={"model": MISTRAL_MODEL, "max_tokens": 5,
-                                     "messages": [{"role": "user", "content": "say hi"}]},
-                          timeout=30, headers={"Authorization": "Bearer %s" % key})
-        print("HTTP status: %s" % r.status_code)
-        print("response body: %s" % r.text[:400])
+    print("\nTesting each model in the chain with one real call...")
+    working = []
+    for model in _models():
+        try:
+            r = requests.post(API, json={"model": model, "max_tokens": 5,
+                                         "messages": [{"role": "user", "content": "say hi"}]},
+                              timeout=30, headers={"Authorization": "Bearer %s" % key})
+        except requests.RequestException as e:
+            print("  %-24s request failed outright: %s" % (model, e))
+            print("  -> this host may not reach api.mistral.ai at all (DNS/firewall/"
+                  "outbound block) - try: curl -I https://api.mistral.ai")
+            return
+        note = {200: "works", 401: "KEY REJECTED - regenerate it on console.mistral.ai",
+                403: "not available on this plan/tier", 404: "model id not found",
+                429: "throttled (free-tier limit for this model)"}.get(r.status_code, "unexpected")
+        print("  %-24s HTTP %s  %s" % (model, r.status_code, note))
         if r.status_code == 200:
-            print("\n-> Mistral is reachable and this key/model works right now.")
+            working.append(model)
         elif r.status_code == 401:
-            print("\n-> The key itself is being rejected - regenerate it on "
-                  "console.mistral.ai and update .env, this key won't start working on its own.")
-        elif r.status_code == 429:
-            print("\n-> Rate-limited right now - check console.mistral.ai's "
-                  "usage page for the actual limit/reset time, this may "
-                  "resolve on its own shortly.")
-        else:
-            print("\n-> Unexpected status - see the response body above for what Mistral said.")
-    except requests.RequestException as e:
-        print("request failed outright: %s" % e)
-        print("-> this VM may not be able to reach api.mistral.ai at all "
-              "(DNS/firewall/outbound block) - try: curl -I https://api.mistral.ai")
+            break                               # the key is bad for every model
+        time.sleep(1.5)                         # stay under the 1 req/s free-tier limits
+    if working:
+        print("\n-> OK: the bot will answer using %s." % working[0])
+    else:
+        print("\n-> No model in the chain works right now - the bot falls back to keyword commands only.")
 
 
 def classify_domain(message):

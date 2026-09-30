@@ -43,11 +43,23 @@ HOME_CITY = os.environ.get("HOME_CITY", "hyderabad").strip().lower()
 # turned out to be a reasoning model that burns tokens on hidden reasoning
 # before any visible output, needing every max_tokens budget in llm.py
 # retuned - switched providers entirely instead of chasing that per-call.
-# mistral-medium-latest is the closest capability tier to the outgoing
-# 70B-class model; mistral-large-latest/mistral-small-latest are the other
-# two real Mistral tiers if a slower-but-stronger or faster-but-lighter
-# model is ever wanted instead.
-MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "mistral-medium-latest")
+#
+# Model choice, settled empirically 30 Sep 2026 against a FREE-tier key (the
+# dashboard's "Completion rate limits per model" page, plus real calls):
+#   mistral-medium-latest  -> 429 every time (limit shown: 1 req/s, 20k tok/min)
+#   mistral-small-latest   -> 429
+#   mistral-large-latest   -> 403 "not available in your subscription tier"
+#   open-mistral-nemo      -> 200 (served by ministral-8b-2512: 625k tok/min,
+#                             3.13 req/s) - extraction/chat quality verified on
+#                             the real prompts, see [[project-bms-gotchas]].
+# The errors looked like "account/key/IP problem" (rotated keys, a fresh
+# account, two networks all failed identically) - it was the model's free-tier
+# availability all along. So: a primary plus a fallback chain (llm._call()
+# walks it), not a single hardcoded model. If billing is ever added, put
+# mistral-medium-latest first via MISTRAL_MODEL.
+MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "open-mistral-nemo")
+MISTRAL_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
+    "MISTRAL_FALLBACK_MODELS", "open-mistral-nemo,mistral-small-latest").split(",") if m.strip()]
 # MISTRAL_API_KEY is read from the environment at call time, never stored here.
 
 

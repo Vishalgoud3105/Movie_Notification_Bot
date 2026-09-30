@@ -126,6 +126,7 @@ def demo():
     demo_movie_chat_scoping()
     demo_group_chats()
     demo_private_chats()
+    demo_llm_fallback_chain()
 
     # blank filters = report everything. Explicitly reset every field
     # shows_for() reads, not just FORMAT/LANGUAGE/VENUES - demo_brain()'s
@@ -227,6 +228,69 @@ def demo_group_chats():
             os.environ.pop("TELEGRAM_CHAT_ID", None)
         if keep_token is not None:
             os.environ["TELEGRAM_API_TOKEN"] = keep_token
+
+
+def demo_llm_fallback_chain():
+    """Reported live 25-30 Sep 2026: every reply was the generic fallback for
+    days. Root cause, found by testing each model against the real API on a
+    free-tier key: mistral-medium/small -> 429, large -> 403 (tier), but
+    open-mistral-nemo -> 200. A single hardcoded model turned "one model
+    throttled" into a total silent outage, so _call() walks a chain."""
+    from watcher import llm
+
+    def reply(status, text="ok"):
+        body = {"choices": [{"message": {"content": text}}]}
+        return type("R", (), {"status_code": status, "text": "err",
+                              "json": staticmethod(lambda: body)})()
+
+    tried, sleeps = [], []
+    real_post, real_sleep = llm.requests.post, llm.time.sleep
+    real_key = os.environ.get("MISTRAL_API_KEY")
+    real_models = (llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS)
+    os.environ["MISTRAL_API_KEY"] = "test-key"
+    llm.MISTRAL_MODEL = "primary"
+    llm.MISTRAL_FALLBACK_MODELS = ["primary", "second", "third"]    # dup must collapse
+    llm.time.sleep = sleeps.append
+
+    def run(statuses):
+        tried.clear(); sleeps.clear()
+        def post(url, json=None, **kw):
+            tried.append(json["model"])
+            return reply(statuses[json["model"]], "from " + json["model"])
+        llm.requests.post = post
+        return llm._call([{"role": "user", "content": "x"}])
+
+    try:
+        assert llm._models() == ["primary", "second", "third"], llm._models()
+
+        # 429 then 403 then 200: walks the chain, never sleeps between models
+        assert run({"primary": 429, "second": 403, "third": 200}) == "from third"
+        assert tried == ["primary", "second", "third"], tried
+        assert sleeps == [], "a per-model refusal must not sleep - it won't clear in seconds"
+
+        # first model healthy -> the rest are never touched
+        assert run({"primary": 200, "second": 200, "third": 200}) == "from primary"
+        assert tried == ["primary"], tried
+
+        # 401 = the KEY is bad; no other model can help, so stop at once
+        assert run({"primary": 401, "second": 200, "third": 200}) is None
+        assert tried == ["primary"], "a rejected key must not be retried on other models"
+
+        # every model refused -> None (callers fall back to keyword replies)
+        assert run({"primary": 429, "second": 429, "third": 403}) is None
+        assert tried == ["primary", "second", "third"], tried
+
+        # 5xx is transient: retried on the SAME model (with backoff) before moving on
+        assert run({"primary": 503, "second": 200, "third": 200}) == "from second"
+        assert tried == ["primary"] * 3 + ["second"], tried
+        assert sleeps == [2, 4, 6], sleeps
+    finally:
+        llm.requests.post, llm.time.sleep = real_post, real_sleep
+        llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS = real_models
+        if real_key is not None:
+            os.environ["MISTRAL_API_KEY"] = real_key
+        else:
+            os.environ.pop("MISTRAL_API_KEY", None)
 
 
 def demo_private_chats():

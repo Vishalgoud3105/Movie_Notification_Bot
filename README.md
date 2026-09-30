@@ -239,7 +239,8 @@ Every value has a default in code; `.env` only overrides.
 | Var | Meaning |
 |---|---|
 | `TELEGRAM_API_TOKEN` / `TELEGRAM_CHAT_ID` | required |
-| `MISTRAL_API_KEY` / `MISTRAL_MODEL` | optional; enables plain-English chat |
+| `MISTRAL_API_KEY` | optional; enables plain-English chat |
+| `MISTRAL_MODEL` / `MISTRAL_FALLBACK_MODELS` | primary model plus fallbacks tried in order on 429/403; default `open-mistral-nemo` (works on the free tier). `python watch.py --diagnose-llm` shows which work for your key |
 | `SOURCE` | `district` (default) or `bms` |
 | `DISTRICT_URL` | the city-specific movie page |
 | `HOME_CITY` | used when a chat request names no city |
