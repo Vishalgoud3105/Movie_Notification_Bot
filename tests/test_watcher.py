@@ -126,6 +126,7 @@ def demo():
     demo_movie_chat_scoping()
     demo_group_chats()
     demo_private_chats()
+    demo_alert_price()
     demo_llm_fallback_chain()
 
     # blank filters = report everything. Explicitly reset every field
@@ -228,6 +229,25 @@ def demo_group_chats():
             os.environ.pop("TELEGRAM_CHAT_ID", None)
         if keep_token is not None:
             os.environ["TELEGRAM_API_TOKEN"] = keep_token
+
+
+def demo_alert_price():
+    """Regression (found 1 Oct 2026): District prices are NUMBERS, BookMyShow's
+    are STRINGS - an int price crashed format_days() (AttributeError on
+    .split), so every priced District alert was silently never sent."""
+    from watcher.movies import messages
+
+    by_date = {"20261012": [{"venue": "PVR Somewhere", "time": "7:00 PM", "mins": 1140,
+                             "sold": False, "format": "2D", "price": 250,
+                             "seat_category": None, "seats": 10}]}
+
+    def price_line(price):
+        by_date["20261012"][0]["price"] = price
+        return [l for l in messages.alert_text(by_date).split("\n") if "from ₹" in l]
+    assert price_line(140) == ["     💰 from ₹140"]
+    assert price_line("350.00") == ["     💰 from ₹350"]
+    assert price_line(185.5) == ["     💰 from ₹185"]
+    assert price_line("") == [] and price_line(None) == [] and price_line("n/a") == []
 
 
 def demo_llm_fallback_chain():

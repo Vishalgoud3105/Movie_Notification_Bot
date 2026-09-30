@@ -65,6 +65,14 @@ def pretty_date(date_code):
     return "%s, %d %s" % (d.strftime("%A"), d.day, d.strftime("%b"))
 
 
+def _as_number(value):
+    """140 / "350.00" -> float; anything unparseable -> None (price just not shown)."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def format_days(by_date):
     """One block per date, grouped by cinema, times on one line. No repetition."""
     lines = []
@@ -77,12 +85,14 @@ def format_days(by_date):
             at = sorted([s for s in shows if s["venue"] == venue], key=lambda s: s["mins"])
             times = ", ".join(s["time"] + (" ❌" if s["sold"] else "") for s in at)
             available = [s for s in at if not s["sold"]]
-            prices = {s["price"] for s in available if s["price"]}
+            # price is a number from District ("areas" price, e.g. 140) but a
+            # string from BookMyShow ("350.00") - .split() on the number
+            # crashed every priced alert, so compare as numbers either way.
+            prices = {p for p in (_as_number(s["price"]) for s in available if s["price"]) if p}
             lines.append("  🎬 %s" % short_venue(venue))
             lines.append("     🕒 %s" % times)
             if prices:
-                lines.append("     💰 from ₹%s"
-                             % min(prices, key=lambda p: float(p or 0)).split(".")[0])
+                lines.append("     💰 from ₹%d" % min(prices))
             if SEAT_CATEGORY:
                 # a category was specifically asked for - name which tier
                 # actually matched, not just the price, since "from ₹X" alone
