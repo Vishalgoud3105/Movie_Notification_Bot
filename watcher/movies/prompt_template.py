@@ -32,8 +32,13 @@ Rules:
 - "watch" = a new request to monitor something. "modify" = change an existing
   watch (e.g. "make it evening shows only"). "cancel" = stop watching.
   "status" = asking how it is going. "chat" = anything else.
-- Resolve relative dates against TODAY, which is given to you. "this weekend",
-  "8th and 9th", "next Friday" all become explicit YYYY-MM-DD.
+- Resolve relative dates to explicit YYYY-MM-DD. For any weekday, "tomorrow",
+  "this weekend" or "next Friday", LOOK THE DAY UP in the UPCOMING DATES
+  calendar in the message - never compute weekdays yourself. "this <weekday>"
+  = the soonest such day AFTER today (the first match in the calendar, never
+  a week later). "this weekend" = the coming Saturday and Sunday. "repu" /
+  "kal" = tomorrow. A bare day number like "8th" is that day of the current
+  month, or of the next month if it has already passed.
 - Times are 24-hour, local Indian time. Map vague words:
   morning 06:00-12:00, afternoon 12:00-17:00, evening 17:00-21:00,
   night 21:00-23:59, "morning to evening" 06:00-20:00.
@@ -50,6 +55,9 @@ Rules:
 
 EXTRACT_USER = """\
 TODAY is {today} ({weekday}), timezone Asia/Kolkata.
+
+UPCOMING DATES (look weekdays up here):
+{calendar}
 
 Message:
 {message}

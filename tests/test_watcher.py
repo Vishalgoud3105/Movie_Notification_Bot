@@ -128,6 +128,7 @@ def demo():
     demo_group_chats()
     demo_private_chats()
     demo_alert_text()
+    demo_llm_calendar()
     demo_llm_fallback_chain()
 
     # blank filters = report everything. Explicitly reset every field
@@ -265,6 +266,28 @@ def demo_alert_text():
         assert price_line("") == [] and price_line(None) == [] and price_line("n/a") == []
     finally:
         messages.LANGUAGE, messages.FORMAT, messages.MOVIE_NAME = keep
+
+
+def demo_llm_calendar():
+    """The date lookup table handed to the model (models get weekday maths
+    wrong). If _calendar() or the templates' {calendar} placeholder drift
+    apart, every extract() raises KeyError - a total silent outage of the chat
+    layer - so pin both."""
+    from watcher import llm
+    from watcher.bus import prompt_template as bpt
+    from watcher.movies import prompt_template as mpt
+
+    lines = llm._calendar("2026-09-30").split("\n")      # 30 Sep 2026 is a Wednesday
+    assert len(lines) == 14, lines
+    assert lines[0] == "Wed 2026-09-30 (today)", lines[0]
+    assert lines[3] == "Sat 2026-10-03", lines[3]          # "this Saturday" -> the 3rd
+    assert lines[-1] == "Tue 2026-10-13", lines[-1]
+    assert llm._calendar("2026-12-30").split("\n")[3] == "Sat 2027-01-02"   # crosses the year
+
+    for tpl in (bpt.EXTRACT_USER, mpt.EXTRACT_USER):
+        filled = tpl.format(today="2026-09-30", weekday="Wednesday", message="hi",
+                            calendar=llm._calendar("2026-09-30"))
+        assert "Sat 2026-10-03" in filled and "hi" in filled, filled
 
 
 def demo_llm_fallback_chain():

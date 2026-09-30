@@ -21,6 +21,7 @@ take the prompt templates as arguments. Defaults point at the movie prompts so
 existing call sites don't have to change.
 """
 
+import datetime as dt
 import json
 import os
 import re
@@ -103,6 +104,20 @@ def _loads(text):
     return None
 
 
+def _calendar(today, days=14):
+    """'2026-09-30' -> 'Wed 2026-09-30 (today)\nThu 2026-10-01\n...' (14 lines).
+
+    The ministral models get weekday arithmetic wrong (measured 30 Sep 2026:
+    "this Saturday" from a Wednesday came back as the 4th/6th/10th instead of
+    the 3rd, on every model) and a wrong date silently watches the wrong day,
+    so hand them a lookup table instead of asking them to compute it. Costs
+    ~14 short lines of prompt per extract call - accepted on purpose.
+    """
+    start = dt.date.fromisoformat(today)
+    return "\n".join("%s %s%s" % (d.strftime("%a"), d.isoformat(), " (today)" if i == 0 else "")
+                     for i, d in enumerate(start + dt.timedelta(days=n) for n in range(days)))
+
+
 def extract(message, today, weekday, system=EXTRACT_SYSTEM, user_template=EXTRACT_USER):
     """A message -> watch-spec dict, or None if the model could not be used.
 
@@ -111,13 +126,16 @@ def extract(message, today, weekday, system=EXTRACT_SYSTEM, user_template=EXTRAC
     `user_template` let another domain (e.g. bus) supply its own schema -
     defaults are the movie ones so existing call sites need not change.
     """
-    out = _call(
-        [{"role": "system", "content": system},
-         {"role": "user", "content": user_template.format(
-             today=today, weekday=weekday, message=message)}],
-        temperature=0.0, json_mode=True, max_tokens=500)
+    out = _call(_extract_messages(system, user_template, message, today, weekday),
+                temperature=0.0, json_mode=True, max_tokens=500)
     spec = _loads(out)
     return spec if isinstance(spec, dict) else None
+
+
+def _extract_messages(system, user_template, message, today, weekday):
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": user_template.format(
+                today=today, weekday=weekday, message=message, calendar=_calendar(today))}]
 
 
 def chat(message, facts, owner_context="a movie fan in Hyderabad", system=CHAT_SYSTEM):

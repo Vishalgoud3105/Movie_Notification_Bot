@@ -28,8 +28,12 @@ Rules:
 - "watch" = a new request to monitor a route's fare. "modify" = change an
   existing watch (e.g. "make it under 700 now"). "cancel" = stop watching.
   "status" = asking how it is going. "chat" = anything else.
-- Resolve relative dates against TODAY, which is given to you. "this
-  Saturday", "20th", "next Friday" all become explicit YYYY-MM-DD.
+- Resolve relative dates to explicit YYYY-MM-DD. For any weekday, "tomorrow",
+  "this Saturday" or "next Friday", LOOK THE DAY UP in the UPCOMING DATES
+  calendar in the message - never compute weekdays yourself. "this <weekday>"
+  = the soonest such day AFTER today (the first match in the calendar, never
+  a week later). "repu" / "kal" = tomorrow. A bare day number like "18th" is
+  that day of the current month, or of the next month if it has already passed.
 - target_price is optional. If the user gives no ceiling, leave it null - the
   bot then alerts on every new lowest price it finds instead of a single goal.
 - from_city/to_city must be an actual city or town, never a state, region or
@@ -60,6 +64,9 @@ Rules:
 
 EXTRACT_USER = """\
 TODAY is {today} ({weekday}), timezone Asia/Kolkata.
+
+UPCOMING DATES (look weekdays up here):
+{calendar}
 
 Message:
 {message}
