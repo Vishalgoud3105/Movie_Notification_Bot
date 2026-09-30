@@ -51,6 +51,7 @@ def demo():
         _demo_quality_and_govt_filter()
         _demo_chat_scoping()
         _demo_llm_outage_fallback()
+        _demo_multi_route()
     finally:
         if os.path.exists(watchspec.WATCH_FILE):
             os.remove(watchspec.WATCH_FILE)
@@ -550,6 +551,31 @@ def _demo_seat_filtering():
 
     assert abhibus._cheapest_matching_seat(seats, gender=None, seat_type=None)["seat_no"] == "UD1", \
         "no filter at all -> cheapest available seat overall (UD1 @900, cheaper than LD5 @1200)"
+
+
+def _demo_multi_route():
+    """One message naming several routes creates several watches (each through
+    the normal validation), and one bad route doesn't sink the others."""
+    from watcher import llm
+    from watcher.bus import abhibus, brain
+
+    d1, d2 = _future_iso(20), _future_iso(22)
+    specs = [{"intent": "watch", "from_city": "hyderabad", "to_city": "bangalore", "date": d1},
+             {"intent": "watch", "from_city": "hyderabad", "to_city": "goa", "date": d2},
+             {"intent": "watch", "from_city": "pune", "to_city": "pune", "date": d2}]   # invalid
+    real_resolve, real_avail, real_all = abhibus.resolve, llm.available, llm.extract_all
+    abhibus.resolve = lambda name: (7, None)
+    llm.available = lambda: True
+    llm.extract_all = lambda *a, **k: specs
+    try:
+        reply = brain.handle("watch hyd to blr on 20th and hyd to goa on 22nd", 555)
+        assert reply.count("Watching") == 2, reply
+        assert "same city" in reply.lower(), "the invalid route must be reported, not dropped: " + reply
+        assert {w["to_city"] for w in watchspec.load_all(555)} == {"bangalore", "goa"}
+        assert watchspec.load_all(556) == [], "another chat must not see them"
+    finally:
+        abhibus.resolve, llm.available, llm.extract_all = real_resolve, real_avail, real_all
+        watchspec.finish(None, "cancelled")
 
 
 def _demo_llm_outage_fallback():

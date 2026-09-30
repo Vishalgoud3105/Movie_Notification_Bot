@@ -174,8 +174,14 @@ def handle(message, chat_id, hits=None, broken=None, tally=None):
 
     # 2. the model works out intent
     now = dt.datetime.now(IST)
-    spec = llm.extract(text, now.strftime("%Y-%m-%d"), now.strftime("%A"),
-                       system=EXTRACT_SYSTEM, user_template=EXTRACT_USER)
+    specs = llm.extract_all(text, now.strftime("%Y-%m-%d"), now.strftime("%A"),
+                            system=EXTRACT_SYSTEM, user_template=EXTRACT_USER)
+    if len(specs) > 1 and all(s.get("intent") == "watch" for s in specs):
+        # "hyd to blr on 20 oct and hyd to goa on 22 oct": each route goes
+        # through the same validation as a single one (city check, past date,
+        # dedup); the confirmations (or follow-up questions) come back together.
+        return "\n\n".join(_apply_new_watch(s, chat_id) for s in specs)
+    spec = specs[0] if specs else None
 
     if spec and spec.get("intent") in ("watch", "modify"):
         if spec["intent"] == "modify":

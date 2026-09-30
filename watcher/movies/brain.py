@@ -163,7 +163,13 @@ def handle(message, chat_id, hits, broken, bookable, tally=None):
 
     # 2. the model works out intent
     now = dt.datetime.now(IST)
-    spec = llm.extract(text, now.strftime("%Y-%m-%d"), now.strftime("%A"))
+    specs = llm.extract_all(text, now.strftime("%Y-%m-%d"), now.strftime("%A"))
+    if len(specs) > 1 and all(s.get("intent") == "watch" for s in specs):
+        # "watch jawan and pushpa 2": every request goes through the same
+        # validation as a single one (title lookup, dates, dedup), and the
+        # confirmations (or follow-up questions) are returned together.
+        return "\n\n".join(_apply_new_watch(s, chat_id) for s in specs)
+    spec = specs[0] if specs else None
 
     if spec and spec.get("intent") in ("watch", "modify"):
         if spec["intent"] == "modify":

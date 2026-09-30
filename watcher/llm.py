@@ -169,6 +169,56 @@ def _extract_messages(system, user_template, message, today, weekday):
                 today=today, weekday=weekday, message=message, calendar=_calendar(today))}]
 
 
+# --- several watches in one message ------------------------------------------
+# "watch jawan and pushpa 2" used to create ONE watch and silently drop the
+# other, because the extraction schema holds a single spec. Splitting the TEXT
+# at "and" is unsafe here ("8th and 9th", "PVR and INOX", "male and female
+# seats" are all ONE request), so instead the model is allowed to answer with
+# a list, and only for messages that contain a conjunction-like word at all.
+MAX_REQUESTS = 3            # 3 specs x ~120 output tokens stays far inside MULTI_MAX_TOKENS
+MULTI_MAX_TOKENS = 800
+MULTI_ADDENDUM = (
+    "\n\nIf the message contains MORE THAN ONE separate watch request (different "
+    "movies, or different bus routes), return exactly "
+    '{"requests": [<one object in the shape above per request, same field rules>]} '
+    "with at most %d entries. Dates like '8th and 9th', or options like 'male and "
+    "female seats', inside ONE request are NOT separate requests. If it is a "
+    "single request, return one object as usual." % MAX_REQUESTS)
+_MULTI_HINT = re.compile(r"\b(and|also|plus|then)\b|&|;", re.I)
+
+
+def extract_all(message, today, weekday, system=EXTRACT_SYSTEM, user_template=EXTRACT_USER):
+    """A message -> list of watch-spec dicts ([] if the model could not be used).
+
+    Messages with no conjunction-like word take exactly the old single-extract
+    path (no extra tokens, no behavior change). The rest get one call that may
+    answer with a list; it REPLACES the single call, it does not add one. A
+    compound message is the hardest case, so that call prefers the accurate
+    model (measured 98.8% vs 94.0% on the golden set). If TypeSafe Jev is on
+    and confident the message is a single request, the plain path runs. Any
+    failure or truncated/invalid list falls back to the plain single extract.
+    """
+    def single():
+        one = extract(message, today, weekday, system, user_template)
+        return [one] if one else []
+
+    if not _MULTI_HINT.search(message or ""):
+        return single()
+    p = jev.multiple(message) if jev.available() and jev.mode() == "on" else None
+    if p is not None and p < jev.MULTI_MAX_SINGLE:
+        return single()
+
+    out = _call(_extract_messages(system + MULTI_ADDENDUM, user_template, message, today, weekday),
+                temperature=0.0, json_mode=True, max_tokens=MULTI_MAX_TOKENS,
+                prefer=JEV_COMPLEX_MODEL)
+    data = _loads(out)
+    specs = []
+    if isinstance(data, dict):
+        items = data["requests"] if isinstance(data.get("requests"), list) else [data]
+        specs = [s for s in items if isinstance(s, dict)][:MAX_REQUESTS]
+    return specs or single()
+
+
 def chat(message, facts, owner_context="a movie fan in Hyderabad", system=CHAT_SYSTEM):
     """Conversational reply grounded in facts, or None."""
     return _call(

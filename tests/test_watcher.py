@@ -130,6 +130,7 @@ def demo():
     demo_alert_text()
     demo_llm_calendar()
     demo_jev_routing()
+    demo_multi_request()
     demo_llm_fallback_chain()
 
     # blank filters = report everything. Explicitly reset every field
@@ -397,6 +398,125 @@ def demo_jev_routing():
     finally:
         if keep is not None:
             os.environ["TYPESAFE_API_KEY"] = keep
+
+
+def demo_multi_request():
+    """One message -> several watches. Text is never split at "and" ("8th and
+    9th", "PVR and INOX" are ONE request); the model may answer with a list,
+    only for messages that contain a conjunction-like word, replacing (not
+    adding to) the single extract call."""
+    import json as js
+    import tempfile
+    import requests as rq
+    from watcher import llm
+    from watcher.movies import brain, search, watchspec
+
+    calls, jev_answers = [], {}
+
+    def post(url, json=None, **kw):
+        if "typesafe" in url:
+            qid = next(iter(json["questions"]))
+            ans = jev_answers.get(qid)
+            if ans is None:
+                raise rq.ConnectionError("jev down")
+            return type("R", (), {"status_code": 200, "text": "",
+                                  "json": staticmethod(lambda: {"answers": {qid: ans}})})()
+        calls.append({"model": json["model"], "max_tokens": json["max_tokens"],
+                      "multi": "MORE THAN ONE separate watch" in json["messages"][0]["content"]})
+        content = replies.pop(0)
+        return type("R", (), {"status_code": 200, "text": "",
+                              "json": staticmethod(lambda: {"choices": [{"message": {"content": content}}]})})()
+
+    a = {"intent": "watch", "title": "jawan", "dates": ["2026-10-12"]}
+    b = {"intent": "watch", "title": "pushpa 2", "dates": ["2026-10-12"]}
+    keep_env = {k: os.environ.get(k) for k in ("MISTRAL_API_KEY", "TYPESAFE_API_KEY", "JEV_ROUTING")}
+    real_post = llm.requests.post
+    real_models = (llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS, llm.JEV_COMPLEX_MODEL)
+    llm.requests.post = post
+    os.environ["MISTRAL_API_KEY"] = "m"
+    for k in ("TYPESAFE_API_KEY", "JEV_ROUTING"):
+        os.environ.pop(k, None)
+    llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS, llm.JEV_COMPLEX_MODEL = "fast", [], "strong"
+
+    def run(message, *contents):
+        calls.clear(); replies[:] = [js.dumps(c) if not isinstance(c, str) else c for c in contents]
+        llm._route.cache_clear()
+        return llm.extract_all(message, "2026-10-01", "Thursday")
+
+    replies = []
+    try:
+        # no conjunction word -> exactly the old single path: 1 call, 500 tokens, no list prompt
+        assert run("watch jawan on 12 oct", a) == [a]
+        assert calls == [{"model": "fast", "max_tokens": 500, "multi": False}], calls
+
+        # a real compound message: ONE call (replaces the single one), list prompt,
+        # 800 output tokens, prefers the accurate model
+        assert run("watch jawan and pushpa 2 on 12 oct", {"requests": [a, b]}) == [a, b]
+        assert calls == [{"model": "strong", "max_tokens": 800, "multi": True}], calls
+
+        # "and" inside ONE request: list prompt used, model answers with a single object
+        assert run("watch jawan on 8th and 9th oct", a) == [a]
+        assert len(calls) == 1 and calls[0]["multi"], calls
+
+        # invalid / truncated list output -> falls back to the plain single extract
+        assert run("watch jawan and pushpa 2", '{"requests": [{"intent"', a) == [a]
+        assert [c["multi"] for c in calls] == [True, False], calls
+
+        # capped at MAX_REQUESTS, non-dict junk dropped
+        many = {"requests": [a, b, a, b, a, "junk", 7]}
+        assert len(run("watch a and b and c and d and e", many)) == llm.MAX_REQUESTS
+
+        # nothing usable at all -> []
+        assert run("hello and welcome", "not json", "still not json") == []
+
+        # Jev (on) confident it's ONE request -> plain path, no list prompt, no accuracy risk
+        os.environ["TYPESAFE_API_KEY"], os.environ["JEV_ROUTING"] = "t", "on"
+        jev_answers.update(multi={"type": "noul", "noul": 0.05},
+                           complexity={"type": "choice", "choice": "simple", "confidence": 0.9})
+        assert run("watch jawan on 8th and 9th oct", a) == [a]
+        assert calls[0]["multi"] is False and len(calls) == 1, calls
+        # Jev says several -> list path; Jev errors -> list path too (fail-open default)
+        jev_answers["multi"] = {"type": "noul", "noul": 0.9}
+        assert run("watch jawan and pushpa 2", {"requests": [a, b]}) == [a, b] and calls[0]["multi"]
+        del jev_answers["multi"]
+        assert run("watch jawan and pushpa 2", {"requests": [a, b]}) == [a, b] and calls[0]["multi"]
+    finally:
+        llm.requests.post = real_post
+        llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS, llm.JEV_COMPLEX_MODEL = real_models
+        for k, v in keep_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        llm._route.cache_clear()
+
+    # the brain turns a list into several real watches and joins the replies
+    keep_watch = watchspec.WATCH_FILE
+    watchspec.WATCH_FILE = os.path.join(tempfile.gettempdir(), "_multi_watch_test.json")
+    if os.path.exists(watchspec.WATCH_FILE):
+        os.remove(watchspec.WATCH_FILE)
+    real_find, real_avail, real_all = search.find, llm.available, llm.extract_all
+    titles = {"jawan": ("Jawan", "1"), "pushpa 2": ("Pushpa 2", "2")}
+    search.find = lambda title, city=None, session=None: dict(zip(
+        ("title", "movie_id"), titles[title.lower()]), url="https://x/" + title, city="hyderabad", cities=[])
+    llm.available = lambda: True
+    llm.extract_all = lambda *a_, **k_: [a, b]
+    try:
+        reply = brain.handle("watch jawan and pushpa 2 on 12 oct", 777, {}, [], None)
+        assert reply.count("Watching") == 2 and "Jawan" in reply and "Pushpa 2" in reply, reply
+        assert {w["title"] for w in watchspec.load_all(777)} == {"Jawan", "Pushpa 2"}
+        assert watchspec.load_all(888) == [], "another chat must not see them"
+
+        # a list containing anything but watches is NOT treated as several watches
+        llm.extract_all = lambda *a_, **k_: [a, {"intent": "cancel"}]
+        watchspec.finish(None, "cancelled", chat_id=777)
+        brain.handle("watch jawan and cancel", 777, {}, [], None)
+        assert len(watchspec.load_all(777)) <= 1
+    finally:
+        search.find, llm.available, llm.extract_all = real_find, real_avail, real_all
+        if os.path.exists(watchspec.WATCH_FILE):
+            os.remove(watchspec.WATCH_FILE)
+        watchspec.WATCH_FILE = keep_watch
 
 
 def demo_llm_fallback_chain():
