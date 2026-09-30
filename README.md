@@ -249,6 +249,7 @@ Every value has a default in code; `.env` only overrides.
 | `FORMAT` / `LANGUAGE` | punctuation-insensitive, so `4DX 3D` matches `4DX-3D` |
 | `VENUES` | substring match; blank = every cinema |
 | `SEAT_CATEGORY` | free-text seat tier, e.g. `recliner`; blank = any |
+| `TYPESAFE_API_KEY` / `JEV_ROUTING` | optional; TypeSafe Jev picks the fast or accurate Mistral model per message. `JEV_ROUTING` = `off` / `shadow` (default: log only) / `on`. Run `python watch.py --jev-eval` before `on`. The message text is sent to TypeSafe too |
 | `SCAN_EVERY` / `LONG_POLL` | `--serve` only: 600 s and 25 s |
 
 These are only the *default* env-configured movie watch. Bus has no env

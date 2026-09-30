@@ -27,8 +27,12 @@ import os
 import re
 import time
 
+import threading
+from functools import lru_cache
+
 import requests
 
+from . import jev
 from .config import *
 from .movies.prompt_template import (CHAT_SYSTEM, CHAT_USER, EXTRACT_SYSTEM,
                                      EXTRACT_USER, TROUBLESHOOT_SYSTEM)
@@ -41,12 +45,39 @@ def available():
     return bool(os.environ.get("MISTRAL_API_KEY"))
 
 
-def _models():
-    """Primary first, then the fallbacks, no duplicates."""
-    return list(dict.fromkeys([MISTRAL_MODEL] + MISTRAL_FALLBACK_MODELS))
+def _models(prefer=None):
+    """`prefer` (if any) first, then the primary and fallbacks, no duplicates."""
+    return list(dict.fromkeys(([prefer] if prefer else []) + [MISTRAL_MODEL] + MISTRAL_FALLBACK_MODELS))
 
 
-def _call(messages, temperature=0.4, json_mode=False, max_tokens=700):
+@lru_cache(maxsize=128)
+def _route(message):
+    """The model Jev says should go first for this message, or None.
+
+    Cached per message text so extract() and a follow-up chat() on the SAME
+    message cost one Jev call, not two.
+    """
+    return {"simple": JEV_SIMPLE_MODEL, "complex": JEV_COMPLEX_MODEL}.get(jev.complexity(message))
+
+
+def _preferred(message):
+    """Model to try first for `message`, or None = today's static order.
+
+    off: never asks Jev. shadow (the default until --jev-eval has been run with
+    a real key): asks Jev on a background thread purely to log what it WOULD
+    have chosen, so it adds no latency and changes nothing. on: asks Jev and
+    acts on it, waiting at most jev.TIMEOUT. Any failure inside is already
+    swallowed by jev.complexity(), which returns None.
+    """
+    if not jev.available():
+        return None
+    if jev.mode() == "shadow":
+        threading.Thread(target=_route, args=(message,), daemon=True).start()
+        return None
+    return _route(message)
+
+
+def _call(messages, temperature=0.4, json_mode=False, max_tokens=700, prefer=None):
     """One chat completion, or None on any failure.
 
     Walks the model chain (see config.py's MISTRAL_MODEL comment): a free-tier
@@ -68,7 +99,7 @@ def _call(messages, temperature=0.4, json_mode=False, max_tokens=700):
     if json_mode:
         body["response_format"] = {"type": "json_object"}
 
-    for model in _models():
+    for model in _models(prefer):
         body["model"] = model
         for attempt in range(3):
             try:
@@ -127,7 +158,7 @@ def extract(message, today, weekday, system=EXTRACT_SYSTEM, user_template=EXTRAC
     defaults are the movie ones so existing call sites need not change.
     """
     out = _call(_extract_messages(system, user_template, message, today, weekday),
-                temperature=0.0, json_mode=True, max_tokens=500)
+                temperature=0.0, json_mode=True, max_tokens=500, prefer=_preferred(message))
     spec = _loads(out)
     return spec if isinstance(spec, dict) else None
 
@@ -144,7 +175,7 @@ def chat(message, facts, owner_context="a movie fan in Hyderabad", system=CHAT_S
         [{"role": "system", "content": system.format(
             facts=facts or "(no facts available)", owner_context=owner_context)},
          {"role": "user", "content": CHAT_USER.format(message=message)}],
-        temperature=0.5, max_tokens=350)
+        temperature=0.5, max_tokens=350, prefer=_preferred(message))
 
 
 def troubleshoot(message, facts, system=TROUBLESHOOT_SYSTEM):
@@ -153,7 +184,7 @@ def troubleshoot(message, facts, system=TROUBLESHOOT_SYSTEM):
         [{"role": "system", "content": system.format(
             facts=facts or "(none captured)", scan_min=SCAN_EVERY // 60)},
          {"role": "user", "content": message}],
-        temperature=0.3, max_tokens=400)
+        temperature=0.3, max_tokens=400, prefer=_preferred(message))
 
 
 def _masked(value):
@@ -188,6 +219,10 @@ def diagnose():
     print("MISTRAL_API_KEY: %s" % _masked(key))
     print("model chain (tried in this order): %s" % " -> ".join(_models()))
     print("API endpoint: %s" % API)
+    print("TYPESAFE_API_KEY (Jev routing): %s" % _masked(os.environ.get("TYPESAFE_API_KEY")))
+    print("JEV_ROUTING: %s  (simple -> %s, complex -> %s)"
+          % (jev.mode() if jev.available() or os.environ.get("TYPESAFE_API_KEY") else "inactive - no key",
+             JEV_SIMPLE_MODEL, JEV_COMPLEX_MODEL))
     if not key:
         print("\nNo key at all - available() is False, the bot is running "
               "keyword-only. Nothing further to test.")

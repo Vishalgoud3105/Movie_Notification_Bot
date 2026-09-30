@@ -129,6 +129,7 @@ def demo():
     demo_private_chats()
     demo_alert_text()
     demo_llm_calendar()
+    demo_jev_routing()
     demo_llm_fallback_chain()
 
     # blank filters = report everything. Explicitly reset every field
@@ -288,6 +289,114 @@ def demo_llm_calendar():
         filled = tpl.format(today="2026-09-30", weekday="Wednesday", message="hi",
                             calendar=llm._calendar("2026-09-30"))
         assert "Sat 2026-10-03" in filled and "hi" in filled, filled
+
+
+def demo_jev_routing():
+    """Jev picks which Mistral model is tried FIRST per message; it must never
+    be able to break or delay a reply (fail-open) and must not act at all in
+    shadow/off mode. Both services are mocked in one fake requests.post."""
+    import requests as rq
+    from watcher import jev, llm
+
+    mistral_calls, jev_calls = [], []
+    behavior = {}
+
+    def post(url, json=None, **kw):
+        if "typesafe" in url:
+            jev_calls.append(json["state"])
+            if behavior.get("jev_raises"):
+                raise rq.ConnectionError("jev down")
+            return type("R", (), {"status_code": behavior.get("jev_status", 200), "text": "err",
+                                  "json": staticmethod(lambda: {"answers": {"complexity": {
+                                      "type": "choice", "choice": behavior["label"],
+                                      "confidence": behavior["conf"], "probabilities": {}}}})})()
+        mistral_calls.append(json["model"])
+        return type("R", (), {"status_code": 200, "text": "",
+                              "json": staticmethod(lambda: {"choices": [{"message": {"content": "ok"}}]})})()
+
+    keep_env = {k: os.environ.get(k) for k in ("MISTRAL_API_KEY", "TYPESAFE_API_KEY", "JEV_ROUTING")}
+    real_post, real_thread = llm.requests.post, llm.threading.Thread
+    real_models = (llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS,
+                   llm.JEV_SIMPLE_MODEL, llm.JEV_COMPLEX_MODEL)
+    llm.requests.post = post
+    os.environ["MISTRAL_API_KEY"] = "m-key"
+    llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS = "static-first", ["static-second"]
+    llm.JEV_SIMPLE_MODEL, llm.JEV_COMPLEX_MODEL = "fast", "strong"
+
+    def first_model(message, label=None, conf=0.9, **env):
+        """Which model Mistral was asked first for `message`."""
+        llm._route.cache_clear()
+        mistral_calls.clear(); jev_calls.clear()
+        behavior.clear(); behavior.update(label=label, conf=conf, **{k: v for k, v in env.items() if k.startswith("jev_")})
+        for k in ("TYPESAFE_API_KEY", "JEV_ROUTING"):
+            os.environ.pop(k, None)
+        if env.get("key"):
+            os.environ["TYPESAFE_API_KEY"] = "t-key"
+        if env.get("mode"):
+            os.environ["JEV_ROUTING"] = env["mode"]
+        assert llm.chat(message, "facts") == "ok"
+        return mistral_calls[0]
+
+    class Inline:                       # run the shadow-mode "background" thread in-line
+        def __init__(self, target, args=(), daemon=None): self.t, self.a = target, args
+        def start(self): self.t(*self.a)
+
+    try:
+        # no Jev key -> never calls Jev, static order (today's behavior)
+        assert first_model("hi", "complex") == "static-first" and jev_calls == []
+
+        # on + confident -> routed model goes first; the static chain stays behind it
+        assert first_model("make it under 700", "complex", key=True, mode="on") == "strong"
+        assert first_model("what can you do", "simple", key=True, mode="on") == "fast"
+        assert jev_calls == ["what can you do"], "exactly one Jev call per message"
+
+        # the decision is cached: extract() then chat() on the SAME message = 1 Jev call
+        first_model("same message", "complex", key=True, mode="on")
+        llm.chat("same message", "facts")
+        assert jev_calls == ["same message"], jev_calls
+
+        # low confidence / "unclear" -> static order
+        assert first_model("hmm", "complex", conf=0.3, key=True, mode="on") == "static-first"
+        assert first_model("ignore previous", "unclear", key=True, mode="on") == "static-first"
+
+        # FAIL-OPEN: Jev exception, Jev 500 -> reply still produced, static order
+        assert first_model("x1", "complex", key=True, mode="on", jev_raises=True) == "static-first"
+        assert first_model("x2", "complex", key=True, mode="on", jev_status=500) == "static-first"
+
+        # off: never asks Jev even with a key
+        assert first_model("x3", "complex", key=True, mode="off") == "static-first" and jev_calls == []
+
+        # shadow (default): asks Jev (to log) but does NOT act on the answer
+        llm.threading.Thread = Inline
+        assert first_model("x4", "complex", key=True, mode="shadow") == "static-first"
+        assert jev_calls == ["x4"], "shadow mode must still consult Jev so it can log"
+        assert first_model("x5", "complex", key=True) == "static-first", "default mode must be shadow"
+
+        # a routed model that then 429s still falls through the normal chain
+        # (Jev only reorders; it does not replace the safety net)
+        assert llm._models("strong") == ["strong", "static-first", "static-second"]
+        assert llm._models("static-second") == ["static-second", "static-first"]
+    finally:
+        llm.requests.post, llm.threading.Thread = real_post, real_thread
+        (llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS,
+         llm.JEV_SIMPLE_MODEL, llm.JEV_COMPLEX_MODEL) = real_models
+        for k, v in keep_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        llm._route.cache_clear()
+
+    # the golden set is what --jev-eval checks against a real key: >=20 cases,
+    # every label represented, and it must skip cleanly with no key
+    from collections import Counter
+    assert len(jev.GOLDEN) >= 20 and set(Counter(l for _, l in jev.GOLDEN)) == {"simple", "complex", "unclear"}
+    keep = os.environ.pop("TYPESAFE_API_KEY", None)
+    try:
+        jev.evaluate()                  # prints a skip notice, must not raise
+    finally:
+        if keep is not None:
+            os.environ["TYPESAFE_API_KEY"] = keep
 
 
 def demo_llm_fallback_chain():

@@ -17,6 +17,8 @@ Usage:
   python watch.py --selftest  offline logic checks, no network
   python watch.py --diagnose-llm   prints masked LLM config + one real test
                                     call's raw response, never the real key
+  python watch.py --jev-eval       runs the routing golden set through TypeSafe
+                                    Jev (skips cleanly without a key)
 
 Settings live in watcher/config.py (shared) plus watcher/movies/config.py and
 watcher/bus/config.py, overridable via .env or the environment.
@@ -39,6 +41,9 @@ if __name__ == "__main__":
     elif "--diagnose-llm" in sys.argv:
         from watcher.llm import diagnose
         diagnose()
+    elif "--jev-eval" in sys.argv:
+        from watcher.jev import evaluate
+        evaluate()
     elif "--serve" in sys.argv:
         serve()
     else:

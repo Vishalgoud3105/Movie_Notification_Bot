@@ -72,7 +72,13 @@ HOME_CITY = os.environ.get("HOME_CITY", "hyderabad").strip().lower()
 MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "ministral-8b-2512")
 MISTRAL_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
     "MISTRAL_FALLBACK_MODELS", "ministral-14b-2512").split(",") if m.strip()]
-# MISTRAL_API_KEY is read from the environment at call time, never stored here.
+# Which model TypeSafe Jev sends a message to (see watcher/jev.py + llm._preferred).
+# "simple" messages go to the fast model, "complex" ones to the accurate one;
+# the other is still the automatic fallback. Only used when Jev is enabled.
+JEV_SIMPLE_MODEL = os.environ.get("JEV_SIMPLE_MODEL", "ministral-8b-2512")
+JEV_COMPLEX_MODEL = os.environ.get("JEV_COMPLEX_MODEL", "ministral-14b-2512")
+# MISTRAL_API_KEY / TYPESAFE_API_KEY are read from the environment at call
+# time, never stored here.
 
 
 # --serve only: how often a domain's sources are scanned, and how long each
