@@ -49,17 +49,29 @@ HOME_CITY = os.environ.get("HOME_CITY", "hyderabad").strip().lower()
 #   mistral-medium-latest  -> 429 every time (limit shown: 1 req/s, 20k tok/min)
 #   mistral-small-latest   -> 429
 #   mistral-large-latest   -> 403 "not available in your subscription tier"
-#   open-mistral-nemo      -> 200 (served by ministral-8b-2512: 625k tok/min,
-#                             3.13 req/s) - extraction/chat quality verified on
-#                             the real prompts, see [[project-bms-gotchas]].
+#   the ministral family (3b/8b/14b, open-mistral-nemo = 8b) -> 200
 # The errors looked like "account/key/IP problem" (rotated keys, a fresh
 # account, two networks all failed identically) - it was the model's free-tier
 # availability all along. So: a primary plus a fallback chain (llm._call()
-# walks it), not a single hardcoded model. If billing is ever added, put
-# mistral-medium-latest first via MISTRAL_MODEL.
-MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "open-mistral-nemo")
+# walks it), not a single hardcoded model.
+#
+# Ranking of the models that DO work, measured 30 Sep 2026 on this bot's real
+# extract/classify/chat jobs: 3 passes x 25 golden messages (bus + movie,
+# incl. Telugu-English, typos, self-correction, prompt injection), ORIGINAL
+# unpadded prompts so it is the model's own ability:
+#   ministral-8b-2512   94.0% fields, 15/15 domain, 1.7s  <- primary
+#   ministral-14b-2512  91.3% fields, 15/15 domain, 3.0s  <- fallback (0.5 req/s cap)
+#   ministral-3b-2512   88.9% fields, 12/15 domain, 1.4s  <- NOT in the chain:
+#       it misroutes "watch hyd to vizag" to movies and gets "on 18th" wrong
+#       every time; a confident wrong date silently watches the wrong day,
+#       which is worse than "trouble reaching my AI". Add it via
+#       MISTRAL_FALLBACK_MODELS only if you'd rather have that than silence.
+# Dated ids are pinned on purpose (that's what was measured); a retired id
+# 404s and the chain moves on - `--diagnose-llm` shows it. If billing is ever
+# added, put mistral-medium-latest first via MISTRAL_MODEL.
+MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "ministral-8b-2512")
 MISTRAL_FALLBACK_MODELS = [m.strip() for m in os.environ.get(
-    "MISTRAL_FALLBACK_MODELS", "open-mistral-nemo,mistral-small-latest").split(",") if m.strip()]
+    "MISTRAL_FALLBACK_MODELS", "ministral-8b-2512,ministral-14b-2512").split(",") if m.strip()]
 # MISTRAL_API_KEY is read from the environment at call time, never stored here.
 
 
