@@ -239,8 +239,10 @@ Every value has a default in code; `.env` only overrides.
 | Var | Meaning |
 |---|---|
 | `TELEGRAM_API_TOKEN` / `TELEGRAM_CHAT_ID` | required |
-| `MISTRAL_API_KEY` | optional; enables plain-English chat |
-| `MISTRAL_MODEL` / `MISTRAL_FALLBACK_MODELS` | primary model plus fallbacks tried in order on 429/403; default `ministral-8b-2512` then `ministral-14b-2512` (both work on the free tier; ranked on this bot's real tasks, see `watcher/config.py`). `python watch.py --diagnose-llm` shows which work for your key |
+| `LLM_PROVIDER` | `mistral` (default) or `groq` - which provider answers first; the other is the automatic failover when its key is set |
+| `MISTRAL_API_KEY` / `GROQ_API_KEY` | optional; either enables plain-English chat |
+| `MISTRAL_MODELS` / `GROQ_MODELS` | comma lists, first = primary, rest tried in order on 429/403; default `ministral-14b-2512,ministral-8b-2512` and `openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b` |
+| `MISTRAL_TOKENS_PER_MINUTE` / `GROQ_TOKENS_PER_MINUTE` | plan ceilings (500000 / 8000); `max_tokens` is shrunk to fit |
 | `SOURCE` | `district` (default) or `bms` |
 | `DISTRICT_URL` | the city-specific movie page |
 | `HOME_CITY` | used when a chat request names no city |

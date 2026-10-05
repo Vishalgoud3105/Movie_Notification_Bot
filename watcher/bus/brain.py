@@ -169,7 +169,7 @@ def handle(message, chat_id, hits=None, broken=None, tally=None):
                 % "; ".join(pretty_spec(w) for w in stopped))
 
     if not llm.available():
-        return ("I only understand keywords right now (no MISTRAL_API_KEY set): "
+        return ("I only understand keywords right now (no MISTRAL_API_KEY or GROQ_API_KEY set): "
                 "say report, status, check, update or cancel.")
 
     # 2. the model works out intent

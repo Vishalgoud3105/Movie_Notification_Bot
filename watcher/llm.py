@@ -1,16 +1,19 @@
-"""Mistral (mistral-medium-latest by default) for understanding messages and
-phrasing replies.
+"""Mistral or Groq (LLM_PROVIDER, Mistral by default) for understanding
+messages and phrasing replies.
 
 Was Groq until 29 Aug 2026 - switched providers after Groq deprecated
 llama-3.3-70b-versatile and its suggested replacement (openai/gpt-oss-120b)
 turned out to be a reasoning model, burning tokens on hidden reasoning before
-any visible output - see config.py's MISTRAL_MODEL comment and
-[[project-bms-gotchas]].
+any visible output - see config.py's MISTRAL_MODELS comment and
+[[project-bms-gotchas]]. Groq is wired back in as a switchable provider AND
+as the automatic failover for Mistral (and vice versa): _call() walks the
+active provider's model chain, then the other provider's, so one outage no
+longer silences the bot.
 
-Deliberately thin: Mistral speaks the OpenAI chat-completions shape, so
+Deliberately thin: both providers speak the OpenAI chat-completions shape, so
 `requests` is enough and the project keeps its single dependency.
 
-Every entry point degrades to None/False rather than raising. If Mistral is
+Every entry point degrades to None/False rather than raising. If the LLM is
 down, misconfigured or slow, the watcher must keep watching and keep
 answering the deterministic keyword commands - the LLM is a convenience
 layer, never a dependency of the alert path.
@@ -37,17 +40,62 @@ from .config import *
 from .movies.prompt_template import (CHAT_SYSTEM, CHAT_USER, EXTRACT_SYSTEM,
                                      EXTRACT_USER, TROUBLESHOOT_SYSTEM)
 
-API = "https://api.mistral.ai/v1/chat/completions"
+PROVIDERS = {
+    "mistral": {"url": "https://api.mistral.ai/v1/chat/completions", "key": "MISTRAL_API_KEY"},
+    "groq": {"url": "https://api.groq.com/openai/v1/chat/completions", "key": "GROQ_API_KEY"},
+}
+# gpt-oss models think before they answer and Groq bills that as completion, so
+# a 500-token extract budget can be spent entirely on reasoning (empty JSON).
+REASONING_MIN_TOKENS = 1500
+
+
+def _key(provider):
+    return os.environ.get(PROVIDERS[provider]["key"])
+
+
+def _providers():
+    """Providers to try, in order: the active one, then the other as failover.
+
+    Only providers with a key are listed, so a blank key switches that provider
+    (and failover to it) off.
+    """
+    order = [LLM_PROVIDER] + [p for p in PROVIDERS if p != LLM_PROVIDER]
+    return [p for p in order if _key(p)]
 
 
 def available():
-    """True if a key is configured. Never logs or returns the key itself."""
-    return bool(os.environ.get("MISTRAL_API_KEY"))
+    """True if any provider has a key. Never logs or returns the key itself."""
+    return bool(_providers())
 
 
-def _models(prefer=None):
-    """`prefer` (if any) first, then the primary and fallbacks, no duplicates."""
-    return list(dict.fromkeys(([prefer] if prefer else []) + [MISTRAL_MODEL] + MISTRAL_FALLBACK_MODELS))
+def _models(prefer=None, provider=None):
+    """`provider`'s models (default: the active one), `prefer` first, no duplicates."""
+    base = GROQ_MODELS if (provider or LLM_PROVIDER) == "groq" else MISTRAL_MODELS
+    return list(dict.fromkeys(([prefer] if prefer else []) + base))
+
+
+def _chain(prefer=None):
+    """[(provider, model), ...] in the order _call() tries them.
+
+    `prefer` (a Jev-picked model) leads the provider that actually lists it, so
+    a Mistral model id is never sent to Groq first; an unlisted one leads the
+    first provider.
+    """
+    order = _providers()
+    owner = next((p for p in order if prefer in _models(provider=p)), order[0] if order else None)
+    return [(p, m) for p in order for m in _models(prefer if p == owner else None, p)]
+
+
+def _fit(max_tokens, messages, provider):
+    """Shrink max_tokens so input + reservation fits the provider's TPM ceiling."""
+    tpm = GROQ_TOKENS_PER_MINUTE if provider == "groq" else MISTRAL_TOKENS_PER_MINUTE
+    used = sum(len(m["content"]) for m in messages) // 4 + 120   # ~4 chars/token + overhead
+    return max(200, min(max_tokens, tpm - used))
+
+
+def _clean(text):
+    """Strip a reasoning model's <think> block, which would break JSON/replies."""
+    return re.sub(r"<think>.*?</think>", "", text or "", flags=re.S).strip()
 
 
 @lru_cache(maxsize=128)
@@ -80,40 +128,46 @@ def _preferred(message):
 def _call(messages, temperature=0.4, json_mode=False, max_tokens=700, prefer=None):
     """One chat completion, or None on any failure.
 
-    Walks the model chain (see config.py's MISTRAL_MODEL comment): a free-tier
+    Walks the model chain (see config.py's MISTRAL_MODELS comment): a free-tier
     key can have one model throttled (429) or tier-blocked (403) while another
     works fine, and a single hardcoded model turned that into a total silent
     outage. Those refusals are per-model and won't clear in seconds, so move
-    straight to the next model - no sleep. A 401 means the KEY is bad, which
-    no model can fix, so stop. Only 5xx/network errors are worth retrying the
-    same model.
+    straight to the next model - no sleep. After the active provider's models
+    comes the OTHER provider's (see _chain), so a whole-provider outage fails
+    over too. A 401 means that provider's KEY is bad, which none of its models
+    can fix, so skip the rest of ITS chain only. Only 5xx/network errors are
+    worth retrying the same model.
     """
-    key = os.environ.get("MISTRAL_API_KEY")
-    if not key:
-        return None
-    body = {
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    if json_mode:
-        body["response_format"] = {"type": "json_object"}
-
-    for model in _models(prefer):
-        body["model"] = model
+    dead = set()
+    for provider, model in _chain(prefer):
+        if provider in dead:
+            continue
+        body = {"model": model, "messages": messages,
+                "temperature": temperature, "max_tokens": max_tokens}
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        if "gpt-oss" in model:
+            body["reasoning_effort"] = "low"
+            body["max_tokens"] = max(max_tokens, REASONING_MIN_TOKENS)
+        body["max_tokens"] = _fit(body["max_tokens"], messages, provider)
         for attempt in range(3):
             try:
-                r = requests.post(API, json=body, timeout=45,
-                                  headers={"Authorization": "Bearer %s" % key})
+                r = requests.post(PROVIDERS[provider]["url"], json=body, timeout=45,
+                                  headers={"Authorization": "Bearer %s" % _key(provider)})
                 if r.status_code == 200:
-                    return r.json()["choices"][0]["message"]["content"].strip()
-                print("mistral HTTP %s (%s): %s" % (r.status_code, model, r.text[:160]))
+                    text = _clean(r.json()["choices"][0]["message"]["content"])
+                    if text:
+                        return text
+                    print("%s %s: empty reply - next model" % (provider, model))
+                    break
+                print("%s HTTP %s (%s): %s" % (provider, r.status_code, model, r.text[:160]))
                 if r.status_code == 401:
-                    return None
-                if r.status_code in (400, 403, 404, 429):
+                    dead.add(provider)
+                    break
+                if r.status_code in (400, 403, 404, 413, 429):
                     break                       # this model won't work now - next one
             except (requests.RequestException, ValueError, KeyError) as e:
-                print("mistral call failed (%s, attempt %d): %s" % (model, attempt + 1, e))
+                print("%s call failed (%s, attempt %d): %s" % (provider, model, attempt + 1, e))
             time.sleep(2 * (attempt + 1))
     return None
 
@@ -265,39 +319,48 @@ def diagnose():
     """
     print("config.DOTENV: %s" % DOTENV)
     print("  exists: %s" % os.path.exists(DOTENV))
-    key = os.environ.get("MISTRAL_API_KEY")
-    print("MISTRAL_API_KEY: %s" % _masked(key))
-    print("model chain (tried in this order): %s" % " -> ".join(_models()))
-    print("API endpoint: %s" % API)
+    order = _providers()
+    print("LLM_PROVIDER: %s  (failover: %s)" % (
+        LLM_PROVIDER, ", ".join(p for p in order if p != LLM_PROVIDER) or "none - other key not set"))
+    for p in PROVIDERS:
+        print("%s: %s" % (PROVIDERS[p]["key"], _masked(_key(p))))
+    print("model chain (tried in this order): %s" % " -> ".join("%s:%s" % pm for pm in _chain()))
     print("TYPESAFE_API_KEY (Jev routing): %s" % _masked(os.environ.get("TYPESAFE_API_KEY")))
     print("JEV_ROUTING: %s  (simple -> %s, complex -> %s)"
           % (jev.mode() if jev.available() or os.environ.get("TYPESAFE_API_KEY") else "inactive - no key",
              JEV_SIMPLE_MODEL, JEV_COMPLEX_MODEL))
-    if not key:
+    if not order:
         print("\nNo key at all - available() is False, the bot is running "
               "keyword-only. Nothing further to test.")
         return
 
     print("\nTesting each model in the chain with one real call...")
     working = []
-    for model in _models():
+    dead = set()
+    for provider, model in _chain():
+        if provider in dead:
+            continue
         try:
-            r = requests.post(API, json={"model": model, "max_tokens": 5,
-                                         "messages": [{"role": "user", "content": "say hi"}]},
-                              timeout=30, headers={"Authorization": "Bearer %s" % key})
+            r = requests.post(PROVIDERS[provider]["url"],
+                              json={"model": model,
+                                    "max_tokens": REASONING_MIN_TOKENS if "gpt-oss" in model else 5,
+                                    "messages": [{"role": "user", "content": "say hi"}]},
+                              timeout=30, headers={"Authorization": "Bearer %s" % _key(provider)})
         except requests.RequestException as e:
-            print("  %-24s request failed outright: %s" % (model, e))
-            print("  -> this host may not reach api.mistral.ai at all (DNS/firewall/"
-                  "outbound block) - try: curl -I https://api.mistral.ai")
-            return
-        note = {200: "works", 401: "KEY REJECTED - regenerate it on console.mistral.ai",
+            print("  %-8s %-24s request failed outright: %s" % (provider, model, e))
+            print("  -> this host may not reach %s at all (DNS/firewall/outbound block)"
+                  % PROVIDERS[provider]["url"].split("/")[2])
+            dead.add(provider)
+            continue
+        note = {200: "works", 401: "KEY REJECTED - regenerate it in the %s console" % provider,
                 403: "not available on this plan/tier", 404: "model id not found",
+                413: "request too large for this plan's tokens-per-minute",
                 429: "throttled (free-tier limit for this model)"}.get(r.status_code, "unexpected")
-        print("  %-24s HTTP %s  %s" % (model, r.status_code, note))
+        print("  %-8s %-24s HTTP %s  %s" % (provider, model, r.status_code, note))
         if r.status_code == 200:
-            working.append(model)
+            working.append("%s:%s" % (provider, model))
         elif r.status_code == 401:
-            break                               # the key is bad for every model
+            dead.add(provider)                  # the key is bad for every model of this provider
         time.sleep(1.5)                         # stay under the 1 req/s free-tier limits
     if working:
         print("\n-> OK: the bot will answer using %s." % working[0])

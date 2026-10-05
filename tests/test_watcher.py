@@ -24,6 +24,9 @@ from watcher.telegram import poll_commands, wants_report
 
 
 def demo():
+    from watcher import llm
+    os.environ.pop("GROQ_API_KEY", None)      # tests below assume Mistral is the only provider
+    llm.LLM_PROVIDER = "mistral"
     bms.VENUES, bms.FORMAT, bms.LANGUAGE = [], "4DX 3D", "English"   # never read .env
     bms.TIME_FROM, bms.TIME_TO = "06:00", "20:00"   # defaults are whole-day now, pin the window
     assert to_minutes("07:10 PM") == 19 * 60 + 10
@@ -132,6 +135,7 @@ def demo():
     demo_jev_routing()
     demo_multi_request()
     demo_llm_fallback_chain()
+    demo_llm_providers()
 
     # blank filters = report everything. Explicitly reset every field
     # shows_for() reads, not just FORMAT/LANGUAGE/VENUES - demo_brain()'s
@@ -317,11 +321,11 @@ def demo_jev_routing():
 
     keep_env = {k: os.environ.get(k) for k in ("MISTRAL_API_KEY", "TYPESAFE_API_KEY", "JEV_ROUTING")}
     real_post, real_thread = llm.requests.post, llm.threading.Thread
-    real_models = (llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS,
+    real_models = (llm.MISTRAL_MODELS,
                    llm.JEV_SIMPLE_MODEL, llm.JEV_COMPLEX_MODEL)
     llm.requests.post = post
     os.environ["MISTRAL_API_KEY"] = "m-key"
-    llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS = "static-first", ["static-second"]
+    llm.MISTRAL_MODELS = ["static-first", "static-second"]
     llm.JEV_SIMPLE_MODEL, llm.JEV_COMPLEX_MODEL = "fast", "strong"
 
     def first_model(message, label=None, conf=0.9, **env):
@@ -379,7 +383,7 @@ def demo_jev_routing():
         assert llm._models("static-second") == ["static-second", "static-first"]
     finally:
         llm.requests.post, llm.threading.Thread = real_post, real_thread
-        (llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS,
+        (llm.MISTRAL_MODELS,
          llm.JEV_SIMPLE_MODEL, llm.JEV_COMPLEX_MODEL) = real_models
         for k, v in keep_env.items():
             if v is None:
@@ -431,12 +435,12 @@ def demo_multi_request():
     b = {"intent": "watch", "title": "pushpa 2", "dates": ["2026-10-12"]}
     keep_env = {k: os.environ.get(k) for k in ("MISTRAL_API_KEY", "TYPESAFE_API_KEY", "JEV_ROUTING")}
     real_post = llm.requests.post
-    real_models = (llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS, llm.JEV_COMPLEX_MODEL)
+    real_models = (llm.MISTRAL_MODELS, llm.JEV_COMPLEX_MODEL)
     llm.requests.post = post
     os.environ["MISTRAL_API_KEY"] = "m"
     for k in ("TYPESAFE_API_KEY", "JEV_ROUTING"):
         os.environ.pop(k, None)
-    llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS, llm.JEV_COMPLEX_MODEL = "fast", [], "strong"
+    llm.MISTRAL_MODELS, llm.JEV_COMPLEX_MODEL = ["fast"], "strong"
 
     def run(message, *contents):
         calls.clear(); replies[:] = [js.dumps(c) if not isinstance(c, str) else c for c in contents]
@@ -482,7 +486,7 @@ def demo_multi_request():
         assert run("watch jawan and pushpa 2", {"requests": [a, b]}) == [a, b] and calls[0]["multi"]
     finally:
         llm.requests.post = real_post
-        llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS, llm.JEV_COMPLEX_MODEL = real_models
+        llm.MISTRAL_MODELS, llm.JEV_COMPLEX_MODEL = real_models
         for k, v in keep_env.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -535,10 +539,9 @@ def demo_llm_fallback_chain():
     tried, sleeps = [], []
     real_post, real_sleep = llm.requests.post, llm.time.sleep
     real_key = os.environ.get("MISTRAL_API_KEY")
-    real_models = (llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS)
+    real_models = llm.MISTRAL_MODELS
     os.environ["MISTRAL_API_KEY"] = "test-key"
-    llm.MISTRAL_MODEL = "primary"
-    llm.MISTRAL_FALLBACK_MODELS = ["primary", "second", "third"]    # dup must collapse
+    llm.MISTRAL_MODELS = ["primary", "primary", "second", "third"]    # dup must collapse
     llm.time.sleep = sleeps.append
 
     def run(statuses):
@@ -575,11 +578,132 @@ def demo_llm_fallback_chain():
         assert sleeps == [2, 4, 6], sleeps
     finally:
         llm.requests.post, llm.time.sleep = real_post, real_sleep
-        llm.MISTRAL_MODEL, llm.MISTRAL_FALLBACK_MODELS = real_models
+        llm.MISTRAL_MODELS = real_models
         if real_key is not None:
             os.environ["MISTRAL_API_KEY"] = real_key
         else:
             os.environ.pop("MISTRAL_API_KEY", None)
+
+
+def demo_llm_providers():
+    """LLM_PROVIDER picks who answers first, and the other provider is the
+    automatic failover - so one provider's outage no longer silences the bot.
+    Groq has to be driven differently (reasoning models), and a typo'd provider
+    must fail at startup, not hours later."""
+    import subprocess
+    from watcher import llm
+
+    calls = []
+    plan = {}                       # "provider/model" -> (status, content)
+
+    def post(url, json=None, **kw):
+        prov = "groq" if "groq" in url else "mistral"
+        calls.append((prov, json["model"], json))
+        status, content = plan.get("%s/%s" % (prov, json["model"]), (200, "ok from " + prov))
+        return type("R", (), {"status_code": status, "text": "err",
+                              "json": staticmethod(lambda: {"choices": [{"message": {"content": content}}]})})()
+
+    keep_env = {k: os.environ.get(k) for k in ("MISTRAL_API_KEY", "GROQ_API_KEY")}
+    real_post, real_sleep = llm.requests.post, llm.time.sleep
+    real_cfg = (llm.LLM_PROVIDER, llm.MISTRAL_MODELS, llm.GROQ_MODELS)
+    llm.requests.post, llm.time.sleep = post, lambda s: None
+    llm.MISTRAL_MODELS = ["m1", "m2"]
+    llm.GROQ_MODELS = ["openai/gpt-oss-120b", "g2"]
+    os.environ["MISTRAL_API_KEY"], os.environ["GROQ_API_KEY"] = "m-key", "g-key"
+
+    def ask(provider, **kw):
+        calls.clear()
+        llm.LLM_PROVIDER = provider
+        return llm._call([{"role": "user", "content": "x"}], **kw)
+
+    try:
+        # default: Mistral first, Groq behind it as failover
+        llm.LLM_PROVIDER = "mistral"
+        assert llm._chain() == [("mistral", "m1"), ("mistral", "m2"),
+                                ("groq", "openai/gpt-oss-120b"), ("groq", "g2")], llm._chain()
+        llm.LLM_PROVIDER = "groq"
+        assert llm._chain() == [("groq", "openai/gpt-oss-120b"), ("groq", "g2"),
+                                ("mistral", "m1"), ("mistral", "m2")], llm._chain()
+
+        # LLM_PROVIDER=groq: Groq answers first, to ITS endpoint; gpt-oss is a reasoning
+        # model, so it gets reasoning_effort=low and a token floor (else the
+        # 500-token extract budget is spent thinking and the JSON comes back empty)
+        assert ask("groq", max_tokens=500, json_mode=True) == "ok from groq"
+        assert [(c[0], c[1]) for c in calls] == [("groq", "openai/gpt-oss-120b")], calls
+        body = calls[0][2]
+        assert body["reasoning_effort"] == "low" and body["max_tokens"] >= llm.REASONING_MIN_TOKENS, body
+        assert body["response_format"] == {"type": "json_object"}
+        ask("mistral")
+        assert "reasoning_effort" not in calls[0][2], "non-reasoning models must not get it"
+
+        # the failover: every Groq model throttled -> Mistral answers
+        plan.update({"groq/openai/gpt-oss-120b": (429, ""), "groq/g2": (403, "")})
+        assert ask("groq") == "ok from mistral"
+        assert [(c[0], c[1]) for c in calls] == [("groq", "openai/gpt-oss-120b"), ("groq", "g2"),
+                                                 ("mistral", "m1")], calls
+        # ...and the other direction
+        plan.clear(); plan.update({"mistral/m1": (429, ""), "mistral/m2": (503, "")})
+        assert ask("mistral") == "ok from groq", calls
+        plan.clear()
+
+        # a rejected Groq KEY skips the rest of Groq (no point trying g2) but NOT Mistral
+        plan.update({"groq/openai/gpt-oss-120b": (401, "")})
+        assert ask("groq") == "ok from mistral"
+        assert [(c[0], c[1]) for c in calls] == [("groq", "openai/gpt-oss-120b"), ("mistral", "m1")], calls
+        plan.clear()
+
+        # an empty 200 (a reasoning model that spent everything thinking) moves on, not "success"
+        plan.update({"groq/openai/gpt-oss-120b": (200, "")})
+        assert ask("groq") == "ok from groq" and [c[1] for c in calls] == ["openai/gpt-oss-120b", "g2"], calls
+        plan.clear()
+
+        # a <think> block must never reach a user or the JSON parser
+        plan.update({"groq/openai/gpt-oss-120b": (200, "<think>hmm {x}</think>\n{\"a\": 1}")})
+        assert ask("groq") == '{"a": 1}'
+        plan.clear()
+
+        # no key for the other provider = failover off; no key at all = unavailable
+        del os.environ["GROQ_API_KEY"]
+        assert llm._providers() == ["mistral"] and llm.available()
+        assert ask("groq") == "ok from mistral" and {c[0] for c in calls} == {"mistral"}
+        del os.environ["MISTRAL_API_KEY"]
+        assert not llm.available() and llm._call([{"role": "user", "content": "x"}]) is None
+        os.environ["GROQ_API_KEY"], os.environ["MISTRAL_API_KEY"] = "g-key", "m-key"
+
+        # a Jev-picked model leads the provider that LISTS it, never the wrong provider
+        llm.LLM_PROVIDER = "groq"
+        assert llm._chain("m2") == [("groq", "openai/gpt-oss-120b"), ("groq", "g2"),
+                                    ("mistral", "m2"), ("mistral", "m1")], llm._chain("m2")
+
+        # max_tokens shrinks to fit Groq's 8000 TPM ceiling instead of a 413...
+        big = [{"role": "user", "content": "x" * 28000}]            # ~7000 tokens
+        assert llm._fit(1500, big, "groq") < 1500
+        assert llm._fit(500, [{"role": "user", "content": "hi"}], "groq") == 500
+        assert llm._fit(1500, big, "mistral") == 1500               # Mistral's ceiling never binds
+    finally:
+        llm.requests.post, llm.time.sleep = real_post, real_sleep
+        llm.LLM_PROVIDER, llm.MISTRAL_MODELS, llm.GROQ_MODELS = real_cfg
+        for k, v in keep_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    # config: a typo'd provider fails at import naming the options; MISTRAL_MODELS
+    # (first = primary) overrides the old two-variable spelling
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def config_run(code, **env):
+        return subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True,
+                              env={**os.environ, **env})
+    bad = config_run("import watcher.config", LLM_PROVIDER="GROG")
+    assert bad.returncode != 0 and "mistral, groq" in bad.stderr, bad.stderr[-300:]
+    good = config_run("import watcher.config as c; print(c.LLM_PROVIDER, c.MISTRAL_MODELS)",
+                      LLM_PROVIDER=" Groq ", MISTRAL_MODELS="a, b ,c")
+    assert good.stdout.strip() == "groq ['a', 'b', 'c']", good.stdout + good.stderr
+    # a blank line means "use the defaults", not "no models"
+    blank = config_run("import watcher.config as c; print(c.MISTRAL_MODELS)", MISTRAL_MODELS="")
+    assert blank.stdout.strip() == "['ministral-14b-2512', 'ministral-8b-2512']", blank.stdout + blank.stderr
 
 
 def demo_private_chats():
