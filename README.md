@@ -27,10 +27,11 @@ anything; it only watches.
 
 Each domain is a self-contained sibling package with its own watch file, own
 state file, own message templates — not one shared `Source` interface, on
-purpose: see `watcher/router.py`'s docstring for why. `watcher/router.py`
-classifies an incoming chat message (movie vs bus) so both domains can share
-one Telegram poll; `watcher/config.py`, `watcher/telegram.py` and
-`watcher/llm.py` are the generic infrastructure every domain reuses.
+purpose. Every chat message goes through ONE conversation pipeline
+(`watcher/assistant/`, below) that decides what it means and which domain it
+is about, so both domains share one Telegram poll; `watcher/config.py`,
+`watcher/telegram.py` and `watcher/llm.py` are the generic infrastructure every
+domain reuses.
 
 ### Multi-watch and chat isolation
 
@@ -105,9 +106,19 @@ watch.py                CLI entry only
 watcher/
   config.py             SHARED: Telegram/Mistral creds, timing, IST clock, keywords
   telegram.py           SHARED: send, poll — pure transport, no domain knowledge
-  llm.py                SHARED: Mistral client, prompts passed in per domain
-  router.py             classifies a chat message movie-vs-bus, one shared poll
+  llm.py                SHARED: model chain + cross-provider failover (Mistral/Groq)
+  dates.py              explicit dates ("26th and 27th December") parsed in code
+  router.py             Telegram message in -> assistant -> reply out
   runner.py             top-level entry points; --serve runs both domains
+
+  assistant/             the chat pipeline (see "Talking to it")
+    pipeline.py           sanitize -> guards -> planner (the ONE LLM call) -> validator -> executor
+    memory.py             the one open clarification per chat (what was understood, what is missing)
+    planner.py            ONE call: splits the message, routes chat vs task, picks capabilities + arguments
+    validator.py          the trust boundary: required fields, dates, enums, forbidden keys
+    executor.py           runs it for the asking chat only
+    capabilities.py       the catalog: watch_movie, watch_bus, show_status, stop_watch, explain_alerts
+    decision_cache.py     reuses successful LLM decisions; guards.py, trace.py, conf.py, outcomes.py
 
   movies/                the original watcher, unmoved in behavior
     config.py            movie settings, layered on the shared config
@@ -118,8 +129,7 @@ watcher/
     shifts.py             shift boundary handling
     state.py              seen.json
     runner.py             the movie run modes (one-shot, --test, --report, --serve loop)
-    prompt_template.py    extraction / chat / troubleshooting prompts
-    brain.py              routes a message: keywords → LLM → fallback
+    actions.py            what the assistant DOES: start/change, status, stop a movie watch
     watchspec.py          the live watch; set by chat, reset when the goal fires
     search.py             resolves a title against District's real catalogue
 
@@ -131,12 +141,12 @@ watcher/
     shifts.py             shift boundary handling
     state.py              seen_bus.json (just the shift tally)
     runner.py             run_cycle_bus(): compare-and-alert logic
-    prompt_template.py    extraction / chat / troubleshooting prompts
-    brain.py              routes a message: keywords → LLM → fallback
+    actions.py            what the assistant DOES: start/change, status, stop a bus watch
     watchspec.py          the live route watch; set by chat, reset when cancelled
 
 tests/test_watcher.py   movie offline self-checks, no framework
 tests/test_bus.py       bus offline self-checks, no framework
+tests/test_assistant.py the chat pipeline against a scripted (and a hostile) fake LLM
 deploy/watcher.service  systemd unit
 ```
 
@@ -177,7 +187,8 @@ journalctl -u watcher -f
 
 ## Talking to it
 
-Needs `MISTRAL_API_KEY` (console.mistral.ai). Describe what you want:
+Needs `MISTRAL_API_KEY` and/or `GROQ_API_KEY` (either works; both give failover).
+Describe what you want:
 
 > *"watch Spider-Man 4DX 3D at Irrum Manzil on 8 and 9 Aug, morning to evening"*
 
@@ -185,18 +196,45 @@ It resolves the title against District's real catalogue — not the model's
 output, since an invented title would become a URL that 404s forever while the
 watcher looked healthy — works out dates and the time window, confirms, and
 **resets itself once the alert has fired** so you can point it at the next show.
-`cancel` stops a watch.
-
 Live events (concerts, cricket) are declined rather than half-supported:
 District's `/events` pages use a different structure.
 
-### Keyword commands — always work, even with Mistral down
+### How a message is understood
 
-> report · status · check · update · news
+One pipeline, **one LLM call per message** (`watcher/assistant/pipeline.py`):
 
-With or without a `/`, anywhere in a sentence. These are matched **before** the
-model is consulted, so the commands that tell you whether the watcher is alive
-never depend on it.
+1. **Guards, no LLM:** control characters and length, a per-chat message throttle, prompt-injection
+   phrases. A whole-message `status` / `cancel` is answered here too, with no model.
+2. **The planner (the only LLM call, strict JSON):** reads the message together with the one question the
+   bot may be waiting on and what this chat already watches, and returns either up to 3 requests
+   (`watch_movie`, `watch_bus`, `show_status`, `stop_watch`, `explain_alerts`, each with its arguments)
+   or a conversational reply (greeting, small talk, about, out of scope). A film title is a movie and two
+   places is a bus route because the capability descriptions say so — there are no keyword lists.
+3. **Validator (code):** required fields, real calendar dates that are not in the past or a year away,
+   enums, time order. Dates written as "26th and 27th December" are parsed in code and override the
+   model's. A missing field becomes ONE question that also says what was understood so far.
+4. **Executor + deterministic reply (code):** runs for the asking chat only; every sentence of the
+   answer is built from real data.
+
+A half-answered question is never lost: the clarification is stored, the next message is merged into it in
+code, and asking the same question repeatedly escalates and then resets instead of looping. `cancel` in the
+middle of a question drops only that question; a running watch is never touched by it.
+
+The template this follows uses three LLM stages (decomposer, intent router, planner). They were measured on
+a 59-case live run against the real models and cut to one: the extra stages cost ~1.2s and two calls per
+message, and the decomposer's rewrite broke follow-up cases that pass without it.
+
+Each message writes one line to `logs/assistant_trace_<date>.jsonl` (intent, capability, which model
+answered, cache hits, outcome) — read it to see why the bot answered what it did.
+
+### Commands that never need the AI
+
+> status · report · check · update · cancel (as the whole message, with or without a `/`)
+
+These run with **no model call**, so the commands that tell you whether the watcher is alive never
+depend on one. If every model is unreachable, a sentence containing status or cancel words still works
+(a deliberate fallback that exists only when understanding is impossible); anything else gets an honest
+"AI unavailable" reply. A bare `cancel` with several watches asks which one instead of stopping them all.
 
 ## Messages you'll get
 
@@ -251,7 +289,6 @@ Every value has a default in code; `.env` only overrides.
 | `FORMAT` / `LANGUAGE` | punctuation-insensitive, so `4DX 3D` matches `4DX-3D` |
 | `VENUES` | substring match; blank = every cinema |
 | `SEAT_CATEGORY` | free-text seat tier, e.g. `recliner`; blank = any |
-| `TYPESAFE_API_KEY` / `JEV_ROUTING` | optional; TypeSafe Jev picks the fast or accurate Mistral model per message. `JEV_ROUTING` = `off` / `shadow` (default: log only) / `on`. Run `python watch.py --jev-eval` before `on`. The message text is sent to TypeSafe too |
 | `SCAN_EVERY` / `LONG_POLL` | `--serve` only: 600 s and 25 s |
 
 These are only the *default* env-configured movie watch. Bus has no env
