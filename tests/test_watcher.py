@@ -132,8 +132,7 @@ def demo():
     demo_private_chats()
     demo_alert_text()
     demo_llm_calendar()
-    demo_jev_routing()
-    demo_multi_request()
+    demo_dates_parse()
     demo_llm_fallback_chain()
     demo_llm_providers()
     from tests.test_assistant import demo as demo_assistant
@@ -277,13 +276,8 @@ def demo_alert_text():
 
 
 def demo_llm_calendar():
-    """The date lookup table handed to the model (models get weekday maths
-    wrong). If _calendar() or the templates' {calendar} placeholder drift
-    apart, every extract() raises KeyError - a total silent outage of the chat
-    layer - so pin both."""
+    """The date lookup table handed to the planner (models get weekday maths wrong)."""
     from watcher import llm
-    from watcher.bus import prompt_template as bpt
-    from watcher.movies import prompt_template as mpt
 
     lines = llm._calendar("2026-09-30").split("\n")      # 30 Sep 2026 is a Wednesday
     assert len(lines) == 14, lines
@@ -292,237 +286,29 @@ def demo_llm_calendar():
     assert lines[-1] == "Tue 2026-10-13", lines[-1]
     assert llm._calendar("2026-12-30").split("\n")[3] == "Sat 2027-01-02"   # crosses the year
 
-    for tpl in (bpt.EXTRACT_USER, mpt.EXTRACT_USER):
-        filled = tpl.format(today="2026-09-30", weekday="Wednesday", message="hi",
-                            calendar=llm._calendar("2026-09-30"))
-        assert "Sat 2026-10-03" in filled and "hi" in filled, filled
 
+def demo_dates_parse():
+    """Explicit dates are parsed in code: the model dropped them ~half the time
+    (23 Nov 2026: "27th December" alone failed 3/3), so the bot asked "which
+    dates?" right after being told."""
+    from watcher import dates
 
-def demo_jev_routing():
-    """Jev picks which Mistral model is tried FIRST per message; it must never
-    be able to break or delay a reply (fail-open) and must not act at all in
-    shadow/off mode. Both services are mocked in one fake requests.post."""
-    import requests as rq
-    from watcher import jev, llm
-
-    mistral_calls, jev_calls = [], []
-    behavior = {}
-
-    def post(url, json=None, **kw):
-        if "typesafe" in url:
-            jev_calls.append(json["state"])
-            if behavior.get("jev_raises"):
-                raise rq.ConnectionError("jev down")
-            return type("R", (), {"status_code": behavior.get("jev_status", 200), "text": "err",
-                                  "json": staticmethod(lambda: {"answers": {"complexity": {
-                                      "type": "choice", "choice": behavior["label"],
-                                      "confidence": behavior["conf"], "probabilities": {}}}})})()
-        mistral_calls.append(json["model"])
-        return type("R", (), {"status_code": 200, "text": "",
-                              "json": staticmethod(lambda: {"choices": [{"message": {"content": "ok"}}]})})()
-
-    keep_env = {k: os.environ.get(k) for k in ("MISTRAL_API_KEY", "TYPESAFE_API_KEY", "JEV_ROUTING")}
-    real_post, real_thread = llm.requests.post, llm.threading.Thread
-    real_models = (llm.MISTRAL_MODELS,
-                   llm.JEV_SIMPLE_MODEL, llm.JEV_COMPLEX_MODEL)
-    llm.requests.post = post
-    os.environ["MISTRAL_API_KEY"] = "m-key"
-    llm.MISTRAL_MODELS = ["static-first", "static-second"]
-    llm.JEV_SIMPLE_MODEL, llm.JEV_COMPLEX_MODEL = "fast", "strong"
-
-    def first_model(message, label=None, conf=0.9, **env):
-        """Which model Mistral was asked first for `message`."""
-        llm._route.cache_clear()
-        mistral_calls.clear(); jev_calls.clear()
-        behavior.clear(); behavior.update(label=label, conf=conf, **{k: v for k, v in env.items() if k.startswith("jev_")})
-        for k in ("TYPESAFE_API_KEY", "JEV_ROUTING"):
-            os.environ.pop(k, None)
-        if env.get("key"):
-            os.environ["TYPESAFE_API_KEY"] = "t-key"
-        if env.get("mode"):
-            os.environ["JEV_ROUTING"] = env["mode"]
-        assert llm.chat(message, "facts") == "ok"
-        return mistral_calls[0]
-
-    class Inline:                       # run the shadow-mode "background" thread in-line
-        def __init__(self, target, args=(), daemon=None): self.t, self.a = target, args
-        def start(self): self.t(*self.a)
-
-    try:
-        # no Jev key -> never calls Jev, static order (today's behavior)
-        assert first_model("hi", "complex") == "static-first" and jev_calls == []
-
-        # on + confident -> routed model goes first; the static chain stays behind it
-        assert first_model("make it under 700", "complex", key=True, mode="on") == "strong"
-        assert first_model("what can you do", "simple", key=True, mode="on") == "fast"
-        assert jev_calls == ["what can you do"], "exactly one Jev call per message"
-
-        # the decision is cached: extract() then chat() on the SAME message = 1 Jev call
-        first_model("same message", "complex", key=True, mode="on")
-        llm.chat("same message", "facts")
-        assert jev_calls == ["same message"], jev_calls
-
-        # low confidence / "unclear" -> static order
-        assert first_model("hmm", "complex", conf=0.3, key=True, mode="on") == "static-first"
-        assert first_model("ignore previous", "unclear", key=True, mode="on") == "static-first"
-
-        # FAIL-OPEN: Jev exception, Jev 500 -> reply still produced, static order
-        assert first_model("x1", "complex", key=True, mode="on", jev_raises=True) == "static-first"
-        assert first_model("x2", "complex", key=True, mode="on", jev_status=500) == "static-first"
-
-        # off: never asks Jev even with a key
-        assert first_model("x3", "complex", key=True, mode="off") == "static-first" and jev_calls == []
-
-        # shadow (default): asks Jev (to log) but does NOT act on the answer
-        llm.threading.Thread = Inline
-        assert first_model("x4", "complex", key=True, mode="shadow") == "static-first"
-        assert jev_calls == ["x4"], "shadow mode must still consult Jev so it can log"
-        assert first_model("x5", "complex", key=True) == "static-first", "default mode must be shadow"
-
-        # a routed model that then 429s still falls through the normal chain
-        # (Jev only reorders; it does not replace the safety net)
-        assert llm._models("strong") == ["strong", "static-first", "static-second"]
-        assert llm._models("static-second") == ["static-second", "static-first"]
-    finally:
-        llm.requests.post, llm.threading.Thread = real_post, real_thread
-        (llm.MISTRAL_MODELS,
-         llm.JEV_SIMPLE_MODEL, llm.JEV_COMPLEX_MODEL) = real_models
-        for k, v in keep_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        llm._route.cache_clear()
-
-    # the golden set is what --jev-eval checks against a real key: >=20 cases,
-    # every label represented, and it must skip cleanly with no key
-    from collections import Counter
-    assert len(jev.GOLDEN) >= 20 and set(Counter(l for _, l in jev.GOLDEN)) == {"simple", "complex", "unclear"}
-    keep = os.environ.pop("TYPESAFE_API_KEY", None)
-    try:
-        jev.evaluate()                  # prints a skip notice, must not raise
-    finally:
-        if keep is not None:
-            os.environ["TYPESAFE_API_KEY"] = keep
-
-
-def demo_multi_request():
-    """One message -> several watches. Text is never split at "and" ("8th and
-    9th", "PVR and INOX" are ONE request); the model may answer with a list,
-    only for messages that contain a conjunction-like word, replacing (not
-    adding to) the single extract call."""
-    import json as js
-    import tempfile
-    import requests as rq
-    from watcher import llm
-    from watcher.movies import brain, search, watchspec
-
-    calls, jev_answers = [], {}
-
-    def post(url, json=None, **kw):
-        if "typesafe" in url:
-            qid = next(iter(json["questions"]))
-            ans = jev_answers.get(qid)
-            if ans is None:
-                raise rq.ConnectionError("jev down")
-            return type("R", (), {"status_code": 200, "text": "",
-                                  "json": staticmethod(lambda: {"answers": {qid: ans}})})()
-        calls.append({"model": json["model"], "max_tokens": json["max_tokens"],
-                      "multi": "MORE THAN ONE separate watch" in json["messages"][0]["content"]})
-        content = replies.pop(0)
-        return type("R", (), {"status_code": 200, "text": "",
-                              "json": staticmethod(lambda: {"choices": [{"message": {"content": content}}]})})()
-
-    a = {"intent": "watch", "title": "jawan", "dates": ["2026-10-12"]}
-    b = {"intent": "watch", "title": "pushpa 2", "dates": ["2026-10-12"]}
-    keep_env = {k: os.environ.get(k) for k in ("MISTRAL_API_KEY", "TYPESAFE_API_KEY", "JEV_ROUTING")}
-    real_post = llm.requests.post
-    real_models = (llm.MISTRAL_MODELS, llm.JEV_COMPLEX_MODEL)
-    llm.requests.post = post
-    os.environ["MISTRAL_API_KEY"] = "m"
-    for k in ("TYPESAFE_API_KEY", "JEV_ROUTING"):
-        os.environ.pop(k, None)
-    llm.MISTRAL_MODELS, llm.JEV_COMPLEX_MODEL = ["fast"], "strong"
-
-    def run(message, *contents):
-        calls.clear(); replies[:] = [js.dumps(c) if not isinstance(c, str) else c for c in contents]
-        llm._route.cache_clear()
-        return llm.extract_all(message, "2026-10-01", "Thursday")
-
-    replies = []
-    try:
-        # no conjunction word -> exactly the old single path: 1 call, 500 tokens, no list prompt
-        assert run("watch jawan on 12 oct", a) == [a]
-        assert calls == [{"model": "fast", "max_tokens": 500, "multi": False}], calls
-
-        # a real compound message: ONE call (replaces the single one), list prompt,
-        # 800 output tokens, prefers the accurate model
-        assert run("watch jawan and pushpa 2 on 12 oct", {"requests": [a, b]}) == [a, b]
-        assert calls == [{"model": "strong", "max_tokens": 800, "multi": True}], calls
-
-        # "and" inside ONE request: list prompt used, model answers with a single object
-        assert run("watch jawan on 8th and 9th oct", a) == [a]
-        assert len(calls) == 1 and calls[0]["multi"], calls
-
-        # invalid / truncated list output -> falls back to the plain single extract
-        assert run("watch jawan and pushpa 2", '{"requests": [{"intent"', a) == [a]
-        assert [c["multi"] for c in calls] == [True, False], calls
-
-        # capped at MAX_REQUESTS, non-dict junk dropped
-        many = {"requests": [a, b, a, b, a, "junk", 7]}
-        assert len(run("watch a and b and c and d and e", many)) == llm.MAX_REQUESTS
-
-        # nothing usable at all -> []
-        assert run("hello and welcome", "not json", "still not json") == []
-
-        # Jev (on) confident it's ONE request -> plain path, no list prompt, no accuracy risk
-        os.environ["TYPESAFE_API_KEY"], os.environ["JEV_ROUTING"] = "t", "on"
-        jev_answers.update(multi={"type": "noul", "noul": 0.05},
-                           complexity={"type": "choice", "choice": "simple", "confidence": 0.9})
-        assert run("watch jawan on 8th and 9th oct", a) == [a]
-        assert calls[0]["multi"] is False and len(calls) == 1, calls
-        # Jev says several -> list path; Jev errors -> list path too (fail-open default)
-        jev_answers["multi"] = {"type": "noul", "noul": 0.9}
-        assert run("watch jawan and pushpa 2", {"requests": [a, b]}) == [a, b] and calls[0]["multi"]
-        del jev_answers["multi"]
-        assert run("watch jawan and pushpa 2", {"requests": [a, b]}) == [a, b] and calls[0]["multi"]
-    finally:
-        llm.requests.post = real_post
-        llm.MISTRAL_MODELS, llm.JEV_COMPLEX_MODEL = real_models
-        for k, v in keep_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        llm._route.cache_clear()
-
-    # the brain turns a list into several real watches and joins the replies
-    keep_watch = watchspec.WATCH_FILE
-    watchspec.WATCH_FILE = os.path.join(tempfile.gettempdir(), "_multi_watch_test.json")
-    if os.path.exists(watchspec.WATCH_FILE):
-        os.remove(watchspec.WATCH_FILE)
-    real_find, real_avail, real_all = search.find, llm.available, llm.extract_all
-    titles = {"jawan": ("Jawan", "1"), "pushpa 2": ("Pushpa 2", "2")}
-    search.find = lambda title, city=None, session=None: dict(zip(
-        ("title", "movie_id"), titles[title.lower()]), url="https://x/" + title, city="hyderabad", cities=[])
-    llm.available = lambda: True
-    llm.extract_all = lambda *a_, **k_: [a, b]
-    try:
-        reply = brain.handle("watch jawan and pushpa 2 on 12 oct", 777, {}, [], None)
-        assert reply.count("Watching") == 2 and "Jawan" in reply and "Pushpa 2" in reply, reply
-        assert {w["title"] for w in watchspec.load_all(777)} == {"Jawan", "Pushpa 2"}
-        assert watchspec.load_all(888) == [], "another chat must not see them"
-
-        # a list containing anything but watches is NOT treated as several watches
-        llm.extract_all = lambda *a_, **k_: [a, {"intent": "cancel"}]
-        watchspec.finish(None, "cancelled", chat_id=777)
-        brain.handle("watch jawan and cancel", 777, {}, [], None)
-        assert len(watchspec.load_all(777)) <= 1
-    finally:
-        search.find, llm.available, llm.extract_all = real_find, real_avail, real_all
-        if os.path.exists(watchspec.WATCH_FILE):
-            os.remove(watchspec.WATCH_FILE)
-        watchspec.WATCH_FILE = keep_watch
+    today = dt.date(2026, 11, 23)
+    two = ["2026-12-26", "2026-12-27"]
+    for text in ("I want you to monitor Avengers Doomsday for the date December 26 and 27 "
+                 "Saturday Sunday for any show time",
+                 "26th and 27th December", "dec 26th & 27th", "26, 27 Dec", "26 and 27 of december"):
+        assert dates.parse(text, today) == two, (text, dates.parse(text, today))
+    assert dates.parse("27th December", today) == ["2026-12-27"]
+    assert dates.parse("watch X on 28 nov and 2 dec", today) == ["2026-11-28", "2026-12-02"]
+    assert dates.parse("3 nov", today) == [], "a passed date a year away is a slip, not a plan"
+    assert dates.parse("2 jan", dt.date(2026, 12, 28)) == ["2027-01-02"], "a date just across New Year is next year"
+    assert dates.parse("23 nov", today) == ["2026-11-23"], "today still counts"
+    # things that look like dates but are not
+    assert dates.parse("31 feb", today) == []
+    assert dates.parse("watch 4dx3d 7pm to 11pm, 2 tickets", today) == []
+    assert dates.parse("decide 5 things", today) == [] and dates.parse("", today) == []
+    assert dates.parse("26 to 28 dec", today) == ["2026-12-28"], "a range is NOT guessed into 26,27,28"
 
 
 def demo_llm_fallback_chain():
@@ -672,10 +458,7 @@ def demo_llm_providers():
         assert not llm.available() and llm._call([{"role": "user", "content": "x"}]) is None
         os.environ["GROQ_API_KEY"], os.environ["MISTRAL_API_KEY"] = "g-key", "m-key"
 
-        # a Jev-picked model leads the provider that LISTS it, never the wrong provider
         llm.LLM_PROVIDER = "groq"
-        assert llm._chain("m2") == [("groq", "openai/gpt-oss-120b"), ("groq", "g2"),
-                                    ("mistral", "m2"), ("mistral", "m1")], llm._chain("m2")
 
         # max_tokens shrinks to fit Groq's 8000 TPM ceiling instead of a 413...
         big = [{"role": "user", "content": "x" * 28000}]            # ~7000 tokens
@@ -907,66 +690,26 @@ if __name__ == "__main__":
 
 
 def demo_brain():
-    """Routing and the watch lifecycle - all offline, no LLM, no network."""
+    """The movie watch business rules and lifecycle - offline, no LLM, no network."""
     import tempfile
-    from watcher import llm
-    from watcher.movies import brain, search, watchspec
+    from watcher.movies import actions, search, watchspec
 
     chat_id = 999
 
-    # keyword commands must work with the LLM completely unavailable
-    real_available, llm.available = llm.available, lambda: False
-    reply = brain.handle("tell me a joke", chat_id, {}, [], None)
-    assert "keywords" in reply.lower(), reply
-    assert "report" in reply.lower(), reply
-    # ...and a status request must never reach the LLM at all - either a real
-    # shift report (📋, an active watch) or the idle message (😴, none right
-    # now) is a valid deterministic answer; what must never happen is falling
-    # through to the model, which llm.available()==False would catch anyway.
-    reply = brain.handle("status", chat_id, {"20260808": []}, [], "20260813")
-    assert reply.startswith("📋") or reply.startswith("😴"), \
-        "status must be answered from data, not the model: %r" % reply
-    llm.available = real_available
-
-    # bug fix, reported live 25 Sep 2026: Mistral rate-limited mid-conversation
-    # (llm._call() returns None on any failure, including a real 429), and
-    # the old fallback message ("I didn't catch that... describe what to
-    # watch") read as "your phrasing is wrong", which drove retyping the same
-    # request over and over - each retry burning another call against the
-    # very rate limit that was already the problem. When the LLM is available
-    # but genuinely returns nothing, the reply must say so honestly and point
-    # at the keyword commands, not blame the user's wording.
-    real_llm_available = llm.available
-    real_extract, real_chat = llm.extract, llm.chat
-    llm.available = lambda: True
-    llm.extract = lambda *a, **k: None
-    llm.chat = lambda *a, **k: None
-    try:
-        reply = brain.handle("watch something good", chat_id, {}, [], None)
-        assert "trouble reaching" in reply.lower(), reply
-        assert "describe what to watch" not in reply.lower(), \
-            "must not blame the user's phrasing when the LLM itself failed: %r" % reply
-        assert "status" in reply.lower() and "cancel" in reply.lower(), \
-            "must point at the keyword commands that still work: %r" % reply
-    finally:
-        llm.available, llm.extract, llm.chat = real_llm_available, real_extract, real_chat
-
     # a title that does not exist is refused, never turned into a dead URL
     real_find, search.find = search.find, lambda *a, **k: None
-    assert "couldn't find" in brain._apply_new_watch(
-        {"title": "a film that does not exist", "dates": ["2026-08-08"]}, chat_id).lower()
+    assert "couldn't find" in actions.watch(chat_id, {"title": "a film that does not exist", "dates": ["2026-08-08"]}).text.lower()
 
     # live events are declined honestly rather than half-supported
     assert search.looks_like_event("Coldplay concert")
     assert search.looks_like_event("India vs Australia cricket match")
     assert not search.looks_like_event("Spider-Man: Brand New Day")
-    assert "live event" in brain._apply_new_watch(
-        {"title": "Coldplay concert", "dates": ["2026-08-08"]}, chat_id).lower()
+    assert "live event" in actions.watch(chat_id, {"title": "Coldplay concert", "dates": ["2026-08-08"]}).text.lower()
 
     # found, but no dates given -> ask, do not guess
     search.find = lambda *a, **k: {"title": "Some Film", "url": "https://x/y",
                                    "city": "hyderabad", "movie_id": "1", "cities": []}
-    assert "which dates" in brain._apply_new_watch({"title": "Some Film"}, chat_id).lower()
+    assert "which dates" in actions.watch(chat_id, {"title": "Some Film"}).text.lower()
 
     # full lifecycle: start a watch, apply it, finish it - and a second,
     # independent watch alongside it (multi-watch, not just one-at-a-time)
@@ -976,9 +719,9 @@ def demo_brain():
     keep_state, sm.STATE_FILE = sm.STATE_FILE, os.path.join(tempfile.gettempdir(),
                                                             "_state_test.json")
     try:
-        msg = brain._apply_new_watch({
+        msg = actions.watch(chat_id, {
             "title": "Some Film", "dates": ["2026-08-08"], "format": "IMAX",
-            "venues": ["Forum"], "time_from": "10:00", "time_to": "22:00"}, chat_id)
+            "venues": ["Forum"], "time_from": "10:00", "time_to": "22:00"}).text
         assert "Watching" in msg, msg
         active = watchspec.load_all()
         assert len(active) == 1 and active[0]["active"] and active[0]["format"] == "IMAX", active
@@ -992,17 +735,17 @@ def demo_brain():
         assert district.DATES == ["20260808"], district.DATES
 
         # a second, independent movie can be watched at the same time
-        msg2 = brain._apply_new_watch({
+        msg2 = actions.watch(chat_id, {
             "title": "Some Film", "dates": ["2026-08-09"], "format": "2D",
-            "venues": [], "time_from": "00:00", "time_to": "23:59"}, chat_id)
+            "venues": [], "time_from": "00:00", "time_to": "23:59"}).text
         assert "Watching" in msg2, msg2
         assert len(watchspec.load_all()) == 2, watchspec.load_all()
 
         # asking to watch the SAME movie+dates again reinforces spec1 rather
         # than creating a wasteful third, duplicate entry
-        brain._apply_new_watch({
+        actions.watch(chat_id, {
             "title": "Some Film", "dates": ["2026-08-08"], "format": "IMAX",
-            "venues": ["Forum"], "time_from": "10:00", "time_to": "22:00"}, chat_id)
+            "venues": ["Forum"], "time_from": "10:00", "time_to": "22:00"}).text
         assert len(watchspec.load_all()) == 2, "must dedup against an identical watch"
 
         # simulate a restart: globals get wiped, re-applying the reloaded spec
@@ -1028,7 +771,7 @@ def demo_brain():
             if os.path.exists(f):
                 os.remove(f)
         watchspec.WATCH_FILE, sm.STATE_FILE = keep_watch, keep_state
-        search.find, llm.available = real_find, real_available
+        search.find = real_find
 
 
 def demo_movie_chat_scoping():
@@ -1037,7 +780,8 @@ def demo_movie_chat_scoping():
     chat, (2) status/facts must only see this chat's own watches, (3) cancel
     must never touch another chat's watch."""
     import tempfile
-    from watcher.movies import brain, runner, watchspec
+    from watcher import assistant
+    from watcher.movies import runner, watchspec
 
     OWNER, GROUP = 100, -500
     keep_watch = watchspec.WATCH_FILE
@@ -1072,7 +816,7 @@ def demo_movie_chat_scoping():
         assert sent == [(None, "legacy alert text")], sent
 
         # (3) cancel: a bare "cancel" from the owner must not touch the group's watch
-        reply = brain.handle("cancel", OWNER, {}, [], None)
+        reply = assistant.handle(OWNER, "cancel", {})
         assert "Stopped watching" in reply, reply
         assert watchspec.load_all(OWNER) == [], "owner's own watch must be gone"
         assert [w["id"] for w in watchspec.load_all(GROUP)] == [group_watch["id"]], \

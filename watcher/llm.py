@@ -30,15 +30,10 @@ import os
 import re
 import time
 
-import threading
-from functools import lru_cache
-
 import requests
 
-from . import jev
 from .config import *
-from .movies.prompt_template import (CHAT_SYSTEM, CHAT_USER, EXTRACT_SYSTEM,
-                                     EXTRACT_USER, TROUBLESHOOT_SYSTEM)
+
 
 PROVIDERS = {
     "mistral": {"url": "https://api.mistral.ai/v1/chat/completions", "key": "MISTRAL_API_KEY"},
@@ -75,22 +70,14 @@ def available():
     return bool(_providers())
 
 
-def _models(prefer=None, provider=None):
-    """`provider`'s models (default: the active one), `prefer` first, no duplicates."""
-    base = GROQ_MODELS if (provider or LLM_PROVIDER) == "groq" else MISTRAL_MODELS
-    return list(dict.fromkeys(([prefer] if prefer else []) + base))
+def _models(provider=None):
+    """`provider`'s models (default: the active one), in order, no duplicates."""
+    return list(dict.fromkeys(GROQ_MODELS if (provider or LLM_PROVIDER) == "groq" else MISTRAL_MODELS))
 
 
-def _chain(prefer=None):
-    """[(provider, model), ...] in the order _call() tries them.
-
-    `prefer` (a Jev-picked model) leads the provider that actually lists it, so
-    a Mistral model id is never sent to Groq first; an unlisted one leads the
-    first provider.
-    """
-    order = _providers()
-    owner = next((p for p in order if prefer in _models(provider=p)), order[0] if order else None)
-    return [(p, m) for p in order for m in _models(prefer if p == owner else None, p)]
+def _chain():
+    """[(provider, model), ...] in the order _call() tries them: the active provider's models, then the others'."""
+    return [(p, m) for p in _providers() for m in _models(p)]
 
 
 def _fit(max_tokens, messages, provider):
@@ -105,34 +92,7 @@ def _clean(text):
     return re.sub(r"<think>.*?</think>", "", text or "", flags=re.S).strip()
 
 
-@lru_cache(maxsize=128)
-def _route(message):
-    """The model Jev says should go first for this message, or None.
-
-    Cached per message text so extract() and a follow-up chat() on the SAME
-    message cost one Jev call, not two.
-    """
-    return {"simple": JEV_SIMPLE_MODEL, "complex": JEV_COMPLEX_MODEL}.get(jev.complexity(message))
-
-
-def _preferred(message):
-    """Model to try first for `message`, or None = today's static order.
-
-    off: never asks Jev. shadow (the default until --jev-eval has been run with
-    a real key): asks Jev on a background thread purely to log what it WOULD
-    have chosen, so it adds no latency and changes nothing. on: asks Jev and
-    acts on it, waiting at most jev.TIMEOUT. Any failure inside is already
-    swallowed by jev.complexity(), which returns None.
-    """
-    if not jev.available():
-        return None
-    if jev.mode() == "shadow":
-        threading.Thread(target=_route, args=(message,), daemon=True).start()
-        return None
-    return _route(message)
-
-
-def _call(messages, temperature=0.4, json_mode=False, max_tokens=700, prefer=None):
+def _call(messages, temperature=0.4, json_mode=False, max_tokens=700):
     """One chat completion, or None on any failure.
 
     Walks the model chain (see config.py's MISTRAL_MODELS comment): a free-tier
@@ -148,7 +108,7 @@ def _call(messages, temperature=0.4, json_mode=False, max_tokens=700, prefer=Non
     global last_failure, last_model
     dead, statuses = set(), []
     last_failure = "unavailable"
-    for provider, model in _chain(prefer):
+    for provider, model in _chain():
         if provider in dead:
             continue
         body = {"model": model, "messages": messages,
@@ -217,94 +177,6 @@ def _calendar(today, days=14):
                      for i, d in enumerate(start + dt.timedelta(days=n) for n in range(days)))
 
 
-def extract(message, today, weekday, system=EXTRACT_SYSTEM, user_template=EXTRACT_USER):
-    """A message -> watch-spec dict, or None if the model could not be used.
-
-    json_mode plus a low temperature: this is parsing, not writing, and a
-    creative answer here silently watches the wrong thing. `system`/
-    `user_template` let another domain (e.g. bus) supply its own schema -
-    defaults are the movie ones so existing call sites need not change.
-    """
-    out = _call(_extract_messages(system, user_template, message, today, weekday),
-                temperature=0.0, json_mode=True, max_tokens=500, prefer=_preferred(message))
-    spec = _loads(out)
-    return spec if isinstance(spec, dict) else None
-
-
-def _extract_messages(system, user_template, message, today, weekday):
-    return [{"role": "system", "content": system},
-            {"role": "user", "content": user_template.format(
-                today=today, weekday=weekday, message=message, calendar=_calendar(today))}]
-
-
-# --- several watches in one message ------------------------------------------
-# "watch jawan and pushpa 2" used to create ONE watch and silently drop the
-# other, because the extraction schema holds a single spec. Splitting the TEXT
-# at "and" is unsafe here ("8th and 9th", "PVR and INOX", "male and female
-# seats" are all ONE request), so instead the model is allowed to answer with
-# a list, and only for messages that contain a conjunction-like word at all.
-MAX_REQUESTS = 3            # 3 specs x ~120 output tokens stays far inside MULTI_MAX_TOKENS
-MULTI_MAX_TOKENS = 800
-MULTI_ADDENDUM = (
-    "\n\nIf the message contains MORE THAN ONE separate watch request (different "
-    "movies, or different bus routes), return exactly "
-    '{"requests": [<one object in the shape above per request, same field rules>]} '
-    "with at most %d entries. Dates like '8th and 9th', or options like 'male and "
-    "female seats', inside ONE request are NOT separate requests. If it is a "
-    "single request, return one object as usual." % MAX_REQUESTS)
-_MULTI_HINT = re.compile(r"\b(and|also|plus|then)\b|&|;", re.I)
-
-
-def extract_all(message, today, weekday, system=EXTRACT_SYSTEM, user_template=EXTRACT_USER):
-    """A message -> list of watch-spec dicts ([] if the model could not be used).
-
-    Messages with no conjunction-like word take exactly the old single-extract
-    path (no extra tokens, no behavior change). The rest get one call that may
-    answer with a list; it REPLACES the single call, it does not add one. A
-    compound message is the hardest case, so that call prefers the accurate
-    model (measured 98.8% vs 94.0% on the golden set). If TypeSafe Jev is on
-    and confident the message is a single request, the plain path runs. Any
-    failure or truncated/invalid list falls back to the plain single extract.
-    """
-    def single():
-        one = extract(message, today, weekday, system, user_template)
-        return [one] if one else []
-
-    if not _MULTI_HINT.search(message or ""):
-        return single()
-    p = jev.multiple(message) if jev.available() and jev.mode() == "on" else None
-    if p is not None and p < jev.MULTI_MAX_SINGLE:
-        return single()
-
-    out = _call(_extract_messages(system + MULTI_ADDENDUM, user_template, message, today, weekday),
-                temperature=0.0, json_mode=True, max_tokens=MULTI_MAX_TOKENS,
-                prefer=JEV_COMPLEX_MODEL)
-    data = _loads(out)
-    specs = []
-    if isinstance(data, dict):
-        items = data["requests"] if isinstance(data.get("requests"), list) else [data]
-        specs = [s for s in items if isinstance(s, dict)][:MAX_REQUESTS]
-    return specs or single()
-
-
-def chat(message, facts, owner_context="a movie fan in Hyderabad", system=CHAT_SYSTEM):
-    """Conversational reply grounded in facts, or None."""
-    return _call(
-        [{"role": "system", "content": system.format(
-            facts=facts or "(no facts available)", owner_context=owner_context)},
-         {"role": "user", "content": CHAT_USER.format(message=message)}],
-        temperature=0.5, max_tokens=350, prefer=_preferred(message))
-
-
-def troubleshoot(message, facts, system=TROUBLESHOOT_SYSTEM):
-    """Diagnostic help grounded in what the watcher actually is, or None."""
-    return _call(
-        [{"role": "system", "content": system.format(
-            facts=facts or "(none captured)", scan_min=SCAN_EVERY // 60)},
-         {"role": "user", "content": message}],
-        temperature=0.3, max_tokens=400, prefer=_preferred(message))
-
-
 def _masked(value):
     """First/last 4 chars only, length shown - enough to eyeball-compare
     against the console without ever printing the real secret. A length or
@@ -339,10 +211,6 @@ def diagnose():
     for p in PROVIDERS:
         print("%s: %s" % (PROVIDERS[p]["key"], _masked(_key(p))))
     print("model chain (tried in this order): %s" % " -> ".join("%s:%s" % pm for pm in _chain()))
-    print("TYPESAFE_API_KEY (Jev routing): %s" % _masked(os.environ.get("TYPESAFE_API_KEY")))
-    print("JEV_ROUTING: %s  (simple -> %s, complex -> %s)"
-          % (jev.mode() if jev.available() or os.environ.get("TYPESAFE_API_KEY") else "inactive - no key",
-             JEV_SIMPLE_MODEL, JEV_COMPLEX_MODEL))
     if not order:
         print("\nNo key at all - available() is False, the bot is running "
               "keyword-only. Nothing further to test.")
@@ -380,24 +248,3 @@ def diagnose():
         print("\n-> OK: the bot will answer using %s." % working[0])
     else:
         print("\n-> No model in the chain works right now - the bot falls back to keyword commands only.")
-
-
-def classify_domain(message):
-    """Which domain (\"movie\" | \"bus\") a chat message is about, or None.
-
-    A single cheap classification call, used by router.py only when keyword
-    matching and "one active watch" both come up empty. Never guesses when
-    Mistral is unavailable - the caller falls back to movie, today's only
-    established default.
-    """
-    out = _call(
-        [{"role": "system", "content":
-          "Reply with exactly one word: \"movie\" or \"bus\". Movie = a film, "
-          "show or cinema ticket. Bus = a bus fare, route or travel booking "
-          "between two places. If genuinely unclear, reply \"movie\"."},
-         {"role": "user", "content": message}],
-        temperature=0.0, max_tokens=5)
-    if not out:
-        return None
-    out = out.strip().lower()
-    return out if out in ("movie", "bus") else None

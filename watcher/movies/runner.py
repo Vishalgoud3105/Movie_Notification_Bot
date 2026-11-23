@@ -13,43 +13,7 @@ from .config import *
 from .messages import alert_text, live_report, pretty_date, shift_report
 from .shifts import maybe_report_shift, shift_at
 from .state import load_state, save_state
-from ..telegram import poll_commands, reply_to, send_telegram, wants_report
-
-
-def answer(chat_id, cmd, hits, broken, bookable, tally=None):
-    """Reply to one chat message about the movie watch(es) - to `chat_id`
-    only, never broadcast. A show-open alert is likewise scoped to whichever
-    chat started that watch (see _send_to_owning_chat()); only the shift
-    report still broadcasts to every known chat.
-
-    Tries the brain (LLM + watch handling) first, but any failure there must
-    still leave you with a working status command, so it falls through to the
-    keyword behaviour rather than raising.
-    """
-    print("command from you: %s" % cmd)
-    try:
-        from .brain import handle
-        reply = handle(cmd, chat_id, hits, broken, bookable, tally)
-        if reply:
-            reply_to(chat_id, reply)
-            return
-    except Exception as e:                      # never let chat break the watcher
-        print("brain failed, falling back to keywords: %s: %s" % (type(e).__name__, e))
-
-    if wants_report(cmd):
-        reply_to(chat_id, live_report(hits, broken, bookable, chat_id,
-                                      checks=(tally or {}).get("checks", 1)))
-    else:
-        reply_to(chat_id, "\n".join([
-            "🤖 I'm here to watch movies for you.",
-            "",
-            "I'm not an AI - I just look for a keyword. Say any of:",
-            "  report · status · check · update · news",
-            "with or without a /, in any sentence.",
-            "  e.g. \"report\", \"/status\", \"any update?\"",
-            "",
-            "You'll also get a report at the end of each shift,",
-            "and one 🚨 alert the moment what you're watching opens."]))
+from ..telegram import poll_commands, reply_to, send_telegram
 
 
 def _send_to_owning_chat(spec, text):

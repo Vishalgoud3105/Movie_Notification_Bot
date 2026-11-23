@@ -16,7 +16,7 @@ from . import sources, watchspec
 from .config import *
 from .messages import alert_text, live_report, pretty_spec, target_met_text
 from .shifts import maybe_report_shift
-from ..telegram import reply_to, send_telegram, wants_report
+from ..telegram import reply_to, send_telegram
 
 
 def _send_to_owning_chat(spec, text):
@@ -119,26 +119,3 @@ def run_cycle_bus(state):
                   % (cheapest["price"], spec["from_city"], spec["to_city"]))
 
     return all_hits, all_broken
-
-
-def answer(chat_id, cmd, hits, broken, tally=None):
-    """Reply to one chat message about bus watches - to `chat_id` only, never
-    broadcast. A price alert is likewise scoped to whichever chat started
-    that watch (see _send_to_owning_chat()); only the shift report still
-    broadcasts to every known chat - it summarizes every route regardless of
-    which chat owns it, not any one chat's own state."""
-    print("bus command from you: %s" % cmd)
-    try:
-        from .brain import handle
-        reply = handle(cmd, chat_id, hits, broken, tally)
-        if reply:
-            reply_to(chat_id, reply)
-            return
-    except Exception as e:                      # never let chat break the watcher
-        print("bus brain failed, falling back to keywords: %s: %s" % (type(e).__name__, e))
-
-    if wants_report(cmd):
-        reply_to(chat_id, live_report(watchspec.load_all(chat_id), hits, broken))
-    else:
-        reply_to(chat_id, "🚌 Say something like \"watch bus from Hyderabad to "
-                         "Bangalore on 20 Aug\" or \"status\".")

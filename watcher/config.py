@@ -83,11 +83,6 @@ HOME_CITY = os.environ.get("HOME_CITY", "hyderabad").strip().lower()
 # move them into this one list.
 MISTRAL_MODELS = [m.strip() for m in (os.environ.get("MISTRAL_MODELS")
     or "ministral-14b-2512,ministral-8b-2512").split(",") if m.strip()]
-# Which model TypeSafe Jev sends a message to (see watcher/jev.py + llm._preferred).
-# "simple" messages go to the fast model, "complex" ones to the accurate one;
-# the other is still the automatic fallback. Only used when Jev is enabled.
-JEV_SIMPLE_MODEL = os.environ.get("JEV_SIMPLE_MODEL", "ministral-8b-2512")
-JEV_COMPLEX_MODEL = os.environ.get("JEV_COMPLEX_MODEL", "ministral-14b-2512")
 
 # Which provider answers FIRST. The other one is the automatic failover: if the
 # active provider is down, throttled or its key is rejected, llm._call() moves
@@ -110,7 +105,7 @@ GROQ_MODELS = [m.strip() for m in (os.environ.get("GROQ_MODELS")
 # it the day the plan changes.
 MISTRAL_TOKENS_PER_MINUTE = int(os.environ.get("MISTRAL_TOKENS_PER_MINUTE", "500000"))
 GROQ_TOKENS_PER_MINUTE = int(os.environ.get("GROQ_TOKENS_PER_MINUTE", "8000"))
-# MISTRAL_API_KEY / GROQ_API_KEY / TYPESAFE_API_KEY are read from the
+# MISTRAL_API_KEY / GROQ_API_KEY are read from the
 # environment at call time, never stored here.
 
 

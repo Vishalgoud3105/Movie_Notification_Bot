@@ -1,4 +1,4 @@
-"""Offline checks for the bus domain and the movie/bus router.
+"""Offline checks for the bus domain (routing is covered by tests/test_assistant.py).
 
 No framework, no fixtures, no network: run via `python watch.py --selftest`
 (which calls this after tests/test_watcher.py's demo()). send_telegram is
@@ -28,8 +28,7 @@ def _future(days_ahead=30):
 
 
 def _future_iso(days_ahead=30):
-    """Same as _future() but "YYYY-MM-DD", the shape brain._apply_new_watch()
-    takes directly (bypassing the LLM's extraction)."""
+    """Same as _future() but "YYYY-MM-DD", the shape the planner's arguments take."""
     return (dt.datetime.now() + dt.timedelta(days=days_ahead)).strftime("%Y-%m-%d")
 
 
@@ -45,13 +44,10 @@ def demo():
         _demo_run_cycle(sent)
         _demo_stale_status()
         _demo_shift_report()
-        _demo_router()
         _demo_refuse_unresolvable()
         _demo_seat_filtering()
         _demo_quality_and_govt_filter()
         _demo_chat_scoping()
-        _demo_llm_outage_fallback()
-        _demo_multi_route()
     finally:
         if os.path.exists(watchspec.WATCH_FILE):
             os.remove(watchspec.WATCH_FILE)
@@ -298,92 +294,33 @@ def _demo_shift_report():
         watchspec.finish(None, "cancelled")
 
 
-def _demo_router():
-    from watcher import router
-    from watcher.movies import watchspec as movie_watchspec
-
-    assert router.classify("watch bus from Hyderabad to Bangalore on 20 Aug") == ["bus"]
-    assert router.classify("any abhibus fares yet?") == ["bus"]
-    assert router.classify("watch Spider-Man 4DX 3D at Irrum Manzil") == ["movie"]
-    assert router.classify("what's showing at the cinema tonight") == ["movie"]
-
-    # a message naming BOTH domains must dispatch to both - not let one
-    # keyword match eat the entire message and silently drop the other half
-    both = router.classify("watch spiderman 4dx 3d and also watch bus from hyd to blr")
-    assert set(both) == {"movie", "bus"}, both
-
-    # deterministic domain-qualified commands: "check bus"/"cancel movie" must
-    # route to exactly that domain, no LLM guessing needed
-    assert router.classify("check bus") == ["bus"]
-    assert router.classify("cancel movie") == ["movie"]
-    assert router.classify("bus status") == ["bus"]
-
-    # ambiguous wording routes to whichever domain actually has a live watch
-    keep_bus, watchspec.WATCH_FILE = watchspec.WATCH_FILE, os.path.join(
-        tempfile.gettempdir(), "_bus_router_test.json")
-    keep_movie, movie_watchspec.WATCH_FILE = movie_watchspec.WATCH_FILE, os.path.join(
-        tempfile.gettempdir(), "_movie_router_test.json")
-    try:
-        watchspec.start({"from_city": "a", "to_city": "b", "date": "20260820",
-                         "target_price": None})
-        assert router.classify("status") == ["bus"]
-        assert router.classify("cancel") == ["bus"]
-        watchspec.finish(None, "cancelled")
-
-        # bug fix: a chat-tagged watch owned by chat 999 must not make an
-        # UNRELATED chat's bare "status" route to bus - ambiguous routing is
-        # chat-scoped the same way the watch data itself is. Neither domain
-        # active for chat 42 -> falls through to the Mistral-unavailable default.
-        from watcher import llm
-        real_available, llm.available = llm.available, lambda: False
-        watchspec.start({"from_city": "c", "to_city": "d", "date": "20260820",
-                         "target_price": None, "chat_id": 999})
-        assert router.classify("status", chat_id=42) == ["movie"], \
-            "chat 42 has no bus watch of its own and must not be routed to " \
-            "bus just because chat 999 has one active"
-        llm.available = real_available
-        watchspec.finish(None, "cancelled")
-
-        # neither active, Mistral unreachable in this offline test -> falls back to movie
-        real_available, llm.available = llm.available, lambda: False
-        assert router.classify("status") == ["movie"]
-        llm.available = real_available
-    finally:
-        for f in (watchspec.WATCH_FILE, movie_watchspec.WATCH_FILE):
-            if os.path.exists(f):
-                os.remove(f)
-        watchspec.WATCH_FILE, movie_watchspec.WATCH_FILE = keep_bus, keep_movie
-
-    assert wants_report("status")   # shared keyword list, sanity check it still loads
-
-
 def _demo_refuse_unresolvable():
-    """brain._apply_new_watch() must refuse a route upfront when AbhiBus can't
+    """actions.watch() must refuse a route upfront when AbhiBus can't
     serve it, instead of starting a watch that can never succeed - and must
     NOT refuse just because the check itself failed to run (a network hiccup
     is not the same as "this city doesn't exist")."""
-    from watcher.bus import abhibus, brain
+    from watcher.bus import abhibus, actions
 
     real_resolve = abhibus.resolve
     chat_id = 111
     travel_date = _future_iso()
     try:
         abhibus.resolve = lambda name: (None, "no-direct-hub")
-        msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "amalapuram",
-                                      "date": travel_date}, chat_id)
+        msg = actions.watch(chat_id, {"from_city": "hyderabad", "to_city": "amalapuram",
+                                      "date": travel_date}).text
         assert "doesn't sell direct tickets" in msg, msg
         assert watchspec.load() is None, "a refused route must never start a watch"
 
         abhibus.resolve = lambda name: (None, "not-found")
-        msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "zzzznotreal",
-                                      "date": travel_date}, chat_id)
+        msg = actions.watch(chat_id, {"from_city": "hyderabad", "to_city": "zzzznotreal",
+                                      "date": travel_date}).text
         assert "couldn't find" in msg.lower(), msg
         assert watchspec.load() is None
 
         # a transient failure (id=None, note=None) must NOT block starting the watch
         abhibus.resolve = lambda name: (None, None)
-        msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "bangalore",
-                                      "date": travel_date}, chat_id)
+        msg = actions.watch(chat_id, {"from_city": "hyderabad", "to_city": "bangalore",
+                                      "date": travel_date}).text
         assert "Watching" in msg, msg
         assert watchspec.load() is not None, \
             "a transient validation failure must not block starting the watch"
@@ -391,26 +328,26 @@ def _demo_refuse_unresolvable():
 
         # a real match proceeds normally
         abhibus.resolve = lambda name: (7, None)
-        msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "bangalore",
-                                      "date": travel_date}, chat_id)
+        msg = actions.watch(chat_id, {"from_city": "hyderabad", "to_city": "bangalore",
+                                      "date": travel_date}).text
         assert "Watching" in msg, msg
         watchspec.finish(None, "cancelled")
 
         # same city twice, a date already in the past, and a target_price the
         # LLM hallucinated as text must all be refused before ever touching
         # AbhiBus or starting a dead/broken watch
-        msg = brain._apply_new_watch({"from_city": "Hyderabad", "to_city": "hyderabad",
-                                      "date": travel_date}, chat_id)
+        msg = actions.watch(chat_id, {"from_city": "Hyderabad", "to_city": "hyderabad",
+                                      "date": travel_date}).text
         assert "same city" in msg.lower(), msg
         assert watchspec.load() is None
 
-        msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "bangalore",
-                                      "date": "2020-01-01"}, chat_id)
+        msg = actions.watch(chat_id, {"from_city": "hyderabad", "to_city": "bangalore",
+                                      "date": "2020-01-01"}).text
         assert "already passed" in msg.lower(), msg
         assert watchspec.load() is None
 
-        msg = brain._apply_new_watch({"from_city": "hyderabad", "to_city": "bangalore",
-                                      "date": travel_date, "target_price": "cheap please"}, chat_id)
+        msg = actions.watch(chat_id, {"from_city": "hyderabad", "to_city": "bangalore",
+                                      "date": travel_date, "target_price": "cheap please"}).text
         assert "didn't understand" in msg.lower(), msg
         assert watchspec.load() is None
     finally:
@@ -425,7 +362,8 @@ def _demo_chat_scoping():
     (2) status must only show this chat's own routes, (3) cancel must never
     touch another chat's watch.
     """
-    from watcher.bus import brain, sources
+    from watcher import assistant
+    from watcher.bus import sources
 
     OWNER, GROUP = 100, -500
     real_scan = sources.scan
@@ -464,7 +402,7 @@ def _demo_chat_scoping():
             "group's chat must not see the owner's route in its own alert"
 
         # (3) cancel: a bare "cancel" typed by the owner must not touch the group's watch
-        reply = brain.handle("cancel", OWNER)
+        reply = assistant.handle(OWNER, "cancel", {})
         assert "Stopped watching" in reply, reply
         assert watchspec.load_all(OWNER) == [], "owner's own watch must be gone"
         assert [w["id"] for w in watchspec.load_all(GROUP)] == [group_watch["id"]], \
@@ -553,56 +491,3 @@ def _demo_seat_filtering():
         "no filter at all -> cheapest available seat overall (UD1 @900, cheaper than LD5 @1200)"
 
 
-def _demo_multi_route():
-    """One message naming several routes creates several watches (each through
-    the normal validation), and one bad route doesn't sink the others."""
-    from watcher import llm
-    from watcher.bus import abhibus, brain
-
-    d1, d2 = _future_iso(20), _future_iso(22)
-    specs = [{"intent": "watch", "from_city": "hyderabad", "to_city": "bangalore", "date": d1},
-             {"intent": "watch", "from_city": "hyderabad", "to_city": "goa", "date": d2},
-             {"intent": "watch", "from_city": "pune", "to_city": "pune", "date": d2}]   # invalid
-    real_resolve, real_avail, real_all = abhibus.resolve, llm.available, llm.extract_all
-    abhibus.resolve = lambda name: (7, None)
-    llm.available = lambda: True
-    llm.extract_all = lambda *a, **k: specs
-    try:
-        reply = brain.handle("watch hyd to blr on 20th and hyd to goa on 22nd", 555)
-        assert reply.count("Watching") == 2, reply
-        assert "same city" in reply.lower(), "the invalid route must be reported, not dropped: " + reply
-        assert {w["to_city"] for w in watchspec.load_all(555)} == {"bangalore", "goa"}
-        assert watchspec.load_all(556) == [], "another chat must not see them"
-    finally:
-        abhibus.resolve, llm.available, llm.extract_all = real_resolve, real_avail, real_all
-        watchspec.finish(None, "cancelled")
-
-
-def _demo_llm_outage_fallback():
-    """Bug fix, reported live 25 Sep 2026: Mistral rate-limited mid-
-    conversation (llm._call() returns None on any failure, incl. a real
-    429), and the old fallback ("I didn't catch that... describe a route")
-    read as "your phrasing is wrong", driving retries that just burned more
-    calls against the same rate limit. When the LLM is available but
-    genuinely returns nothing, the reply must say so and point at the
-    keyword commands - mirrors watcher/movies/brain.py's identical fix."""
-    from watcher import llm
-    from watcher.bus import brain
-
-    real_available, real_extract, real_chat = llm.available, llm.extract, llm.chat
-    llm.available = lambda: True
-    llm.extract = lambda *a, **k: None
-    llm.chat = lambda *a, **k: None
-    try:
-        reply = brain.handle("watch something good", 999)
-        assert "trouble reaching" in reply.lower(), reply
-        assert "describe a route" not in reply.lower(), \
-            "must not blame the user's phrasing when the LLM itself failed: %r" % reply
-        assert "status" in reply.lower() and "cancel" in reply.lower(), \
-            "must point at the keyword commands that still work: %r" % reply
-    finally:
-        llm.available, llm.extract, llm.chat = real_available, real_extract, real_chat
-
-
-if __name__ == "__main__":
-    demo()
