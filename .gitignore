@@ -35,3 +35,6 @@ watch_bus.json
 seen_bus.json
 known_chats.json
 greeted_private.json
+.chatbot_template_backup/
+logs/
+loop-state.md

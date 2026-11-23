@@ -63,6 +63,13 @@ def _providers():
     return [p for p in order if _key(p)]
 
 
+# Why the last _call() returned None ("rate_limited" | "unavailable"; None after a success), and
+# which "provider:model" answered. Read by watcher/assistant/llm_io.py for the user-facing message
+# and the per-message trace.
+last_failure = None
+last_model = None
+
+
 def available():
     """True if any provider has a key. Never logs or returns the key itself."""
     return bool(_providers())
@@ -138,7 +145,9 @@ def _call(messages, temperature=0.4, json_mode=False, max_tokens=700, prefer=Non
     can fix, so skip the rest of ITS chain only. Only 5xx/network errors are
     worth retrying the same model.
     """
-    dead = set()
+    global last_failure, last_model
+    dead, statuses = set(), []
+    last_failure = "unavailable"
     for provider, model in _chain(prefer):
         if provider in dead:
             continue
@@ -157,10 +166,12 @@ def _call(messages, temperature=0.4, json_mode=False, max_tokens=700, prefer=Non
                 if r.status_code == 200:
                     text = _clean(r.json()["choices"][0]["message"]["content"])
                     if text:
+                        last_failure, last_model = None, "%s:%s" % (provider, model)
                         return text
                     print("%s %s: empty reply - next model" % (provider, model))
                     break
                 print("%s HTTP %s (%s): %s" % (provider, r.status_code, model, r.text[:160]))
+                statuses.append(r.status_code)
                 if r.status_code == 401:
                     dead.add(provider)
                     break
@@ -168,7 +179,10 @@ def _call(messages, temperature=0.4, json_mode=False, max_tokens=700, prefer=Non
                     break                       # this model won't work now - next one
             except (requests.RequestException, ValueError, KeyError) as e:
                 print("%s call failed (%s, attempt %d): %s" % (provider, model, attempt + 1, e))
+                statuses.append(0)                 # not an HTTP answer: a timeout among 429s is an outage, not a rate limit
             time.sleep(2 * (attempt + 1))
+    # every model answered 429 -> the caller can say "rate limited, wait a minute" instead of "down"
+    last_failure = "rate_limited" if statuses and all(c == 429 for c in statuses) else "unavailable"
     return None
 
 

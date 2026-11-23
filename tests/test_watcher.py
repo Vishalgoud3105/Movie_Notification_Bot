@@ -136,6 +136,8 @@ def demo():
     demo_multi_request()
     demo_llm_fallback_chain()
     demo_llm_providers()
+    from tests.test_assistant import demo as demo_assistant
+    demo_assistant()
 
     # blank filters = report everything. Explicitly reset every field
     # shows_for() reads, not just FORMAT/LANGUAGE/VENUES - demo_brain()'s
