@@ -1,26 +1,8 @@
 """Everything the bot says: alerts, shift reports, venue and date formatting."""
 
 import datetime as dt
-import random
 
 from .config import *
-
-# Rotated rather than hardcoded to one film: these back the idle/fallback
-# replies, which must work with Mistral down (see brain.py's routing order) and
-# so can't be LLM-phrased like onboarding.py's welcome message is - but
-# always showing the same Spider-Man example read as a canned template.
-_EXAMPLES = [
-    "watch Spider-Man 4DX 3D at Irrum Manzil on 8 and 9 Aug, morning to evening",
-    "watch Pushpa 2 IMAX at Forum Sujana Mall this Friday evening",
-    "watch the new Marvel movie in English at PVR Nizampet this weekend",
-    "watch Kalki 2898 AD 3D in Hyderabad on 25 Aug, afternoon to night",
-    "watch Jawan in Telugu at AMB Cinemas next Saturday",
-]
-
-
-def example_watch_phrase():
-    return random.choice(_EXAMPLES)
-
 
 def short_venue(name):
     """'PVR Superplex Inorbit: LUXE, PXL, 4DX: Cyberabad' -> 'PVR Superplex Inorbit, Cyberabad'."""
@@ -194,8 +176,7 @@ def live_report(hits, broken, bookable, chat_id=None, checks=1):
     from . import watchspec
     watches = watchspec.load_all(chat_id)
     if not watches:
-        return ("😴 No movie is being watched right now. Tell me what to "
-                "watch, e.g. \"%s\"." % example_watch_phrase())
+        return "😴 No movie is being watched right now. Tell me which movie to watch."
 
     now = dt.datetime.now(IST)
     shift = shift_at(now)

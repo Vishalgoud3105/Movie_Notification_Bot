@@ -158,8 +158,7 @@ def live_report(specs, hits, broken):
     here instead of kept as a second, differently-shaped reply function.
     """
     if not specs:
-        return ("🚌 No bus route is being watched right now. Say something like "
-                "\"watch bus from Hyderabad to Bangalore on 20 Aug\".")
+        return "🚌 No bus route is being watched right now. Tell me which route and date to watch."
 
     now = dt.datetime.now(IST)
     shift = shift_at(now)

@@ -458,6 +458,57 @@ def demo_review_regressions():
             os.environ["GROQ_API_KEY"] = keep_groq
 
 
+def demo_no_examples():
+    """The owner asked for NO sample phrases anywhere the bot talks ("e.g. 8th and 9th August", "watch Spider-Man ...")
+    - they read as canned template text. Every kind of reply is collected and scanned. Also: welcoming a new chat
+    must not crash when an API key is set (it called the removed llm.chat())."""
+    from watcher import onboarding
+    from watcher.bus import messages as bus_messages
+    from watcher.movies import messages as movie_messages
+    d1, _ = _days()
+    banned = re.compile(r"e\.g\.|for example|something like|spider-?man|jawan|pushpa|8th and 9th|20th aug|12th oct|\"watch ", re.I)
+    replies = []
+    with Env() as e:
+        def say(chat, text, plan=None):
+            if plan is not None:
+                e.fake.plan = plan
+            replies.append(e.say(chat, text))
+            return replies[-1]
+
+        say(60, "   ")                                                                    # empty
+        say(60, "status")                                                                 # nothing active
+        say(60, "hmm", lambda p: {"requests": [], "chat": "none", "confidence": 0.9})    # unclear
+        say(60, "x", lambda p: {"requests": [], "chat": "about", "confidence": 0.9})     # about
+        say(60, "x", lambda p: {"requests": [], "chat": "out_of_scope", "confidence": 0.9})
+        say(60, "x", lambda p: {"requests": [], "chat": "greeting", "reply": "Hello!", "confidence": 0.9})
+        say(60, "x", lambda p: {"requests": [], "too_many": True, "confidence": 0.9})
+        say(60, "x", lambda p: _plan(("explain_alerts", {})))
+        say(60, "x", lambda p: _plan(("show_status", {"domain": "movie"})))
+        say(60, "x", lambda p: _plan(("show_status", {"domain": "bus"})))
+        # every clarification the bot can ask, and the loop breaker's two escalations
+        say(61, "zorro", lambda p: _movie(title="Zorro Film"))
+        for _ in range(3):
+            say(61, "still zorro")
+        say(62, "route", lambda p: _plan(("watch_bus", {"from_city": "hyderabad", "to_city": "goa"})))
+        say(63, "route", lambda p: _plan(("watch_bus", {"from_city": "hyderabad"})))
+        say(64, "venue only", lambda p: _movie(venues=["somewhere"]))
+        e.fake.down = "unavailable"
+        say(65, "anything at all")
+    replies += [onboarding.welcome_message(), movie_messages.live_report({}, [], None, chat_id=99), bus_messages.live_report([], [], [])]
+    assert len(replies) >= 18 and all(replies)
+    for r in replies:
+        assert not banned.search(r), "sample phrase in a bot reply: %r" % r
+    keep = os.environ.get("MISTRAL_API_KEY")
+    os.environ["MISTRAL_API_KEY"] = "key-present"
+    try:
+        assert onboarding.welcome_message()          # no LLM call, so a key being set cannot break it
+    finally:
+        if keep is None:
+            os.environ.pop("MISTRAL_API_KEY", None)
+        else:
+            os.environ["MISTRAL_API_KEY"] = keep
+
+
 def demo_final_matrix_regressions():
     """From the final live run (24 Nov 2026): three failures only real models produce."""
     d1, d2 = _days()
@@ -539,5 +590,6 @@ def demo():
     demo_cache_memory_trace()
     demo_live_matrix_regressions()
     demo_review_regressions()
+    demo_no_examples()
     demo_final_matrix_regressions()
     print("assistant self-check ok")
